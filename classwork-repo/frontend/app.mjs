@@ -5,7 +5,19 @@ const state = { user: null, assignments: [], students: [], assignment: null, dir
 let loadEpoch = 0;
 let toastTimer;
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
-const date = value => value ? new Intl.DateTimeFormat('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(value)) : '—';
+const date = value => value ? new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date(value)) : '—';
+const closed = a => a.isClosed || (a.dueAt && Date.now() >= Date.parse(a.dueAt));
+const deadline = a => a.dueAt ? `截止：${date(a.dueAt)}（北京时间）` : '不限截止时间';
+const closedMessage = '已截止，不能提交。仍可保存草稿，老师处计为未交。';
+function syncDeadlineUI() {
+  const a = state.assignment;
+  if (state.user?.role !== 'student' || !a || a.submittedAt || !closed(a)) return;
+  const message = document.querySelector('#deadline-state');
+  if (message) { message.hidden = false; message.textContent = closedMessage; }
+  const button = document.querySelector('[data-submit]');
+  if (button) { button.disabled = true; button.textContent = '已截止'; }
+  if (dialog.open) dialog.close();
+}
 function toast(message, error = false) {
   clearTimeout(toastTimer); notice.textContent = message; notice.classList.toggle('error', error); notice.hidden = false;
   toastTimer = setTimeout(() => { notice.hidden = true; }, error ? 8000 : 4000);
@@ -22,17 +34,17 @@ async function api(path, method = 'GET', data) {
     if (response.status === 401 && state.user) {
       loadEpoch++; state.user = null; state.dirty = false; state.assignment = null; state.assignments = []; state.students = []; render();
     }
-    throw new Error(result.error || '操作失败，请重试');
+    throw Object.assign(new Error(result.error || '操作失败，请重试'), { status: response.status });
   }
   return result;
 }
 function badge(a) {
-  return a.submittedAt ? '<span class="badge done">已批改</span>' : a.savedAt ? '<span class="badge draft">草稿</span>' : '<span class="badge">待完成</span>';
+  return a.submittedAt ? '<span class="badge done">已批改</span>' : closed(a) ? '<span class="badge overdue">已截止 · 未交</span>' : a.savedAt ? '<span class="badge draft">草稿</span>' : '<span class="badge">待完成</span>';
 }
 function header() {
   return `<header class="header"><a href="#/" class="brand"><span class="brand-mark">＋</span><span>小小算术<small>班级作业本</small></span></a>
     ${state.user ? `<nav aria-label="主导航"><a href="#/" ${!location.hash.includes('students') ? 'aria-current="page"' : ''}>${state.user.role === 'teacher' ? '作业与成绩' : '我的作业'}</a>${state.user.role === 'teacher' ? `<a href="#/students" ${location.hash.includes('students') ? 'aria-current="page"' : ''}>学生名单</a>` : ''}</nav>
-    <div class="user"><span>${esc(state.user.name)}<small>${state.user.role === 'teacher' ? '教师' : '学生'} · ${esc(state.user.username)}</small></span><button class="text-button" data-action="logout">退出</button></div>` : '<span class="header-note">每天十道题，一点点进步。</span>'}</header>`;
+    <div class="user"><span>${esc(state.user.name)}<small>${state.user.role === 'teacher' ? '教师' : '学生'} · ${esc(state.user.username)}</small></span><button class="text-button" data-action="logout">退出</button></div>` : '<span class="header-note">每天练一练，一点点进步。</span>'}</header>`;
 }
 function loginView() {
   return `<main class="login-layout"><section class="login-story"><span class="eyebrow">把计算，练成小本领</span><h1>今天也来<br>算一算<span class="blue">。</span></h1><p>打开自己的作业本，<br>认真思考，再写下答案。</p>
@@ -51,8 +63,8 @@ function assignmentSummary(a) {
 function teacherHome() {
   return `${pageTitle('教师工作台', '每一份练习，都看得见', `全班 ${state.students.length} 名学生 · 已发布 ${state.assignments.length} 份作业`, '<button class="button secondary" data-action="refresh">刷新成绩 ↻</button>')}
     <div class="teacher-layout"><section><div class="section-heading"><h2>班级作业</h2><span class="muted">最新发布在前</span></div>
-    ${state.assignments.length ? `<div class="assignment-list">${state.assignments.map(a => `<a class="assignment-card" href="#/assignment/${a.id}"><div class="card-top"><span class="eyebrow">${assignmentSummary(a)}</span><span class="arrow">↗</span></div><h3>${esc(a.title)}</h3><p class="muted">发布于 ${date(a.createdAt)}</p><div class="card-stats"><div><strong>${a.submitted}<small> / ${a.total}</small></strong><span>已交人数</span></div><div><strong>${a.pending}</strong><span>未交人数</span></div><div><strong>${a.average ?? '—'}</strong><span>平均分</span></div></div></a>`).join('')}</div>` : '<div class="empty"><span class="empty-symbol">＋ −</span><h3>从第一份练习开始</h3><p>在右侧填写名称，发布全班的十道计算题。</p></div>'}</section>
-    <aside class="panel publish-panel"><span class="eyebrow">一份小练习</span><h2>发布新作业</h2><p class="muted">自动生成 5 道加法和 5 道减法，答案均在 0–20 以内。</p><form id="publish-form"><label>作业名称<input name="title" required maxlength="60" placeholder="例如：周三计算小练习"></label><div class="paper-spec"><span>题目数量<strong>10 题</strong></span><span>每题分值<strong>10 分</strong></span><span>面向学生<strong>全班学生</strong></span></div><p class="form-error" id="publish-error" role="alert"></p><button type="submit" class="button full">发布作业 ＋</button></form><p class="small muted">发布后学生即可开始作答。新加入的学生也能看到历史作业。</p></aside></div>`;
+    ${state.assignments.length ? `<div class="assignment-list">${state.assignments.map(a => `<a class="assignment-card" href="#/assignment/${a.id}"><div class="card-top"><span class="eyebrow">${assignmentSummary(a)}</span><span class="arrow">↗</span></div><h3>${esc(a.title)}</h3><p class="muted">发布于 ${date(a.createdAt)}<br>${deadline(a)}</p><div class="card-stats"><div><strong>${a.submitted}<small> / ${a.total}</small></strong><span>已交人数</span></div><div><strong>${a.pending}</strong><span>未交人数</span></div><div><strong>${a.average ?? '—'}</strong><span>平均分</span></div></div></a>`).join('')}</div>` : '<div class="empty"><span class="empty-symbol">＋ −</span><h3>从第一份练习开始</h3><p>选择题型和题量，发布全班的计算练习。</p></div>'}</section>
+    <aside class="panel publish-panel"><span class="eyebrow">一份小练习</span><h2>发布新作业</h2><p class="muted">每次选择一种题型，全班完成同一套题，满分 100 分。</p><form id="publish-form"><label>作业名称<input name="title" required maxlength="60" placeholder="例如：周三计算小练习"></label><label>练习题型<select name="category">${Object.entries(categoryNames).map(([value, label]) => `<option value="${value}">${label}</option>`).join('')}</select></label><label>题目数量<select name="questionCount">${[10, 20, 50].map(n => `<option value="${n}">${n} 道</option>`).join('')}</select></label><label>截止时间（北京时间，可选）<input type="datetime-local" name="dueAt" step="60"><small>留空则不限时；到点停止提交，仍可保存草稿。</small></label><div class="paper-spec"><span>总分<strong>100 分，按答对比例计分</strong></span><span>面向学生<strong>全班学生</strong></span></div><p class="form-error" id="publish-error" role="alert"></p><button type="submit" class="button full">发布作业 ＋</button></form><p class="small muted">发布后学生即可开始作答。新加入的学生也能看到历史作业。</p></aside></div>`;
 }
 function studentsView() {
   return `${pageTitle('班级管理', '把同学们加进来', '创建账号后，将账号和密码告知对应学生。')}
@@ -60,22 +72,24 @@ function studentsView() {
     <aside class="panel"><span class="eyebrow">加入班级</span><h2>创建学生账号</h2><form id="student-form"><label>学生姓名<input name="name" required maxlength="30" autocomplete="off" placeholder="例如：小雨"></label><label>登录账号<input name="username" required minlength="3" maxlength="32" pattern="[a-zA-Z0-9_-]+" autocomplete="off" placeholder="例如：student03"><small>3–32 位字母、数字、下划线或短横线</small></label><label>初始密码<input name="password" type="password" required minlength="8" maxlength="128" autocomplete="new-password" placeholder="至少 8 个字符"><small>请自行记录并告知学生。</small></label><p class="form-error" id="student-error" role="alert"></p><button type="submit" class="button full">创建学生账号</button></form></aside></div>`;
 }
 function reportView(a) {
-  return `<a class="back-link" href="#/">← 返回班级作业</a>${pageTitle('作业成绩', esc(a.title), `${assignmentSummary(a)} · 满分 100 分 · ${date(a.createdAt)} 发布`, '<button class="button secondary" data-action="refresh">刷新成绩 ↻</button>')}
+  return `<a class="back-link" href="#/">← 返回班级作业</a>${pageTitle('作业成绩', esc(a.title), `${assignmentSummary(a)} · 满分 100 分 · ${date(a.createdAt)} 发布 · ${deadline(a)}`, '<button class="button secondary" data-action="refresh">刷新成绩 ↻</button>')}
     <div class="report-stats"><div><span>已交人数</span><strong>${a.submitted}<small> / ${a.total} 人</small></strong></div><div><span>未交人数</span><strong>${a.pending}<small> 人</small></strong></div><div><span>班级平均分</span><strong>${a.average ?? '—'}<small>${a.average === null ? ' 暂无提交' : ' 分'}</small></strong></div></div>
-    <section class="panel"><div class="section-heading"><h2>每位同学的进度</h2><span class="muted small">平均分仅计算已提交学生</span></div><div class="table-wrap"><table><thead><tr><th scope="col">学生</th><th scope="col">账号</th><th scope="col">作业状态</th><th scope="col">提交时间</th><th scope="col">成绩 / 100</th></tr></thead><tbody>${a.students.map(s => `<tr><td><span class="avatar">${esc(s.name.slice(0, 1))}</span>${esc(s.name)}</td><td class="mono">${esc(s.username)}</td><td>${badge(s)}</td><td>${date(s.submittedAt)}</td><td class="score-cell">${s.score ?? '—'}</td></tr>`).join('') || '<tr><td colspan="5">还没有学生，请前往学生名单创建账号。</td></tr>'}</tbody></table></div></section><details class="panel questions-details"><summary>查看本次题目（10 题）</summary><div class="question-preview">${a.expressions.map((expression, i) => `<span>${i + 1}.　${esc(expression)} = ?</span>`).join('')}</div></details>`;
+    <section class="panel"><div class="section-heading"><h2>每位同学的进度</h2><span class="muted small">平均分仅计算已提交学生</span></div><div class="table-wrap"><table><thead><tr><th scope="col">学生</th><th scope="col">账号</th><th scope="col">作业状态</th><th scope="col">提交时间</th><th scope="col">成绩 / 100</th></tr></thead><tbody>${a.students.map(s => `<tr><td><span class="avatar">${esc(s.name.slice(0, 1))}</span>${esc(s.name)}</td><td class="mono">${esc(s.username)}</td><td>${badge({ ...s, dueAt: a.dueAt, isClosed: a.isClosed })}</td><td>${date(s.submittedAt)}</td><td class="score-cell">${s.score ?? '—'}</td></tr>`).join('') || '<tr><td colspan="5">还没有学生，请前往学生名单创建账号。</td></tr>'}</tbody></table></div></section><details class="panel questions-details"><summary>查看本次题目（${a.questionCount} 题）</summary><div class="question-preview">${a.expressions.map((expression, i) => `<span>${i + 1}.　${esc(expression)} = ?</span>`).join('')}</div></details>`;
 }
 function studentHome() {
-  const pending = state.assignments.filter(a => !a.submittedAt).length;
-  return `${pageTitle('我的作业本', `${esc(state.user.name)}，今天也加油！`, pending ? `还有 ${pending} 份练习等你完成。准备好，就开始吧。` : state.assignments.length ? '所有作业都完成了，可以打开看看批改结果。' : '老师发布作业后，就会出现在这里。')}
-    <section class="student-grid">${state.assignments.map(a => `<a class="assignment-card student-card" href="#/assignment/${a.id}"><div class="card-top">${badge(a)}<span class="muted small">${date(a.createdAt)}</span></div><h2>${esc(a.title)}</h2><p class="muted">${assignmentSummary(a)} · 满分 100 分</p><div class="student-card-bottom">${a.submittedAt ? `<strong class="result-score">${a.score}<small> 分</small></strong><span>查看批改 →</span>` : `<span>${a.savedAt ? `上次已保存 ${a.answers.filter(v => v !== null).length}/10 题` : '认真想一想，再写下答案'}</span><strong>${a.savedAt ? '继续作答' : '开始作答'} →</strong>`}</div></a>`).join('') || '<div class="empty panel"><span class="empty-symbol">＋ −</span><h2>作业本还是空的</h2><p>稍后再来看看吧。</p><button class="button secondary" data-action="refresh">刷新作业</button></div>'}</section>`;
+  const pending = state.assignments.filter(a => !a.submittedAt && !closed(a)).length;
+  const overdue = state.assignments.filter(a => !a.submittedAt && closed(a)).length;
+  const detail = [pending ? `还有 ${pending} 份练习可以提交。` : '', overdue ? `${overdue} 份已截止未交，仍可查看和保存草稿。` : ''].join(' ');
+  return `${pageTitle('我的作业本', `${esc(state.user.name)}，今天也加油！`, detail.trim() || (state.assignments.length ? '所有作业都完成了，可以打开看看批改结果。' : '老师发布作业后，就会出现在这里。'))}
+    <section class="student-grid">${state.assignments.map(a => `<a class="assignment-card student-card" href="#/assignment/${a.id}"><div class="card-top">${badge(a)}<span class="muted small">${date(a.createdAt)}</span></div><h2>${esc(a.title)}</h2><p class="muted">${assignmentSummary(a)} · 满分 100 分<br>${deadline(a)}</p><div class="student-card-bottom">${a.submittedAt ? `<strong class="result-score">${a.score}<small> 分</small></strong><span>查看批改 →</span>` : `<span>${a.savedAt ? `上次已保存 ${a.answers.filter(v => v !== null).length}/${a.questionCount} 题` : '认真想一想，再写下答案'}</span><strong>${closed(a) ? '查看草稿' : a.savedAt ? '继续作答' : '开始作答'} →</strong>`}</div></a>`).join('') || '<div class="empty panel"><span class="empty-symbol">＋ −</span><h2>作业本还是空的</h2><p>稍后再来看看吧。</p><button class="button secondary" data-action="refresh">刷新作业</button></div>'}</section>`;
 }
 function workbook(a) {
   const done = !!a.submittedAt;
   const count = a.answers.filter(v => v !== null).length;
-  return `<a class="back-link" href="#/">← 返回我的作业</a><div class="workbook-heading">${pageTitle(done ? '练习完成' : '专心算一算', esc(a.title), `${assignmentSummary(a)} · 每题 10 分 · 答案是 0–${a.answerMax} 的整数`)}${done ? `<div class="score-stamp"><strong>${a.score}</strong><span>/ 100 分</span></div>` : ''}</div>
-    ${done ? `<div class="result-banner"><strong>${a.score === 100 ? '全部答对，真棒！' : `答对了 ${a.score / 10} 道题，再看看需要订正的地方。`}</strong><span>${date(a.submittedAt)} 提交 · 已自动批改</span></div>` : `<div class="progress-heading"><span id="progress-label">已作答 ${count} / 10 题</span><span id="save-state" class="muted">${a.savedAt ? `草稿保存于 ${date(a.savedAt)}` : '写好几题后，可以先保存草稿。'}</span></div><progress id="progress" max="10" value="${count}" aria-label="作答进度"></progress>`}
-    <form id="answer-form"><fieldset ${done ? 'disabled' : ''}><legend class="sr-only">十道计算题</legend><div class="question-grid">${a.expressions.map((expression, i) => `<div class="question ${done ? (a.results[i].correct ? 'correct' : 'incorrect') : ''}"><span class="question-number">第 ${i + 1} 题</span><div class="equation"><label for="answer-${i}"><span class="sr-only">第 ${i + 1} 题：</span>${esc(expression)} <span class="operator">＝</span></label><input id="answer-${i}" name="answer-${i}" type="number" min="0" max="${a.answerMax}" step="1" inputmode="numeric" autocomplete="off" aria-label="第 ${i + 1} 题答案" value="${esc(a.answers[i])}" ${done ? 'readonly' : ''}></div>${done ? `<div class="question-feedback">${a.results[i].correct ? '✓ 答对了' : `✕ 正确答案：${a.results[i].correctAnswer}`}</div>` : ''}</div>`).join('')}</div></fieldset>
-    ${done ? '<div class="actions result-actions"><a class="button secondary" href="#/">返回我的作业</a><span class="muted">作业已提交，答案不能再修改。</span></div>' : `<div class="answer-actions"><div><strong>慢慢算，认真检查。</strong><p class="small muted">保存草稿后，下次登录可以接着写。</p></div><div class="actions"><button type="button" class="button secondary" data-action="save">保存草稿</button><button type="submit" class="button">提交作业 →</button></div></div><p id="answer-error" class="form-error" role="alert"></p>`}</form>`;
+  return `<a class="back-link" href="#/">← 返回我的作业</a><div class="workbook-heading">${pageTitle(done ? '练习完成' : '专心算一算', esc(a.title), `${assignmentSummary(a)} · 每题 ${100 / a.questionCount} 分 · 答案是 0–${a.answerMax} 的整数 · ${deadline(a)}`)}${done ? `<div class="score-stamp"><strong>${a.score}</strong><span>/ 100 分</span></div>` : ''}</div>
+    ${done ? `<div class="result-banner"><strong>${a.score === 100 ? '全部答对，真棒！' : `答对了 ${a.results.filter(r => r.correct).length} / ${a.questionCount} 道题，再看看需要订正的地方。`}</strong><span>${date(a.submittedAt)} 提交 · 已自动批改</span></div>` : `<div class="progress-heading"><span id="progress-label">已作答 ${count} / ${a.questionCount} 题</span><span id="save-state" class="muted">${a.savedAt ? `草稿保存于 ${date(a.savedAt)}` : '写好几题后，可以先保存草稿。'}</span></div><progress id="progress" max="${a.questionCount}" value="${count}" aria-label="作答进度"></progress>`}
+    <p id="deadline-state" class="deadline-message" role="status" hidden></p><form id="answer-form"><fieldset ${done ? 'disabled' : ''}><legend class="sr-only">${a.questionCount} 道计算题</legend><div class="question-grid">${a.expressions.map((expression, i) => `<div class="question ${done ? (a.results[i].correct ? 'correct' : 'incorrect') : ''}"><span class="question-number">第 ${i + 1} 题</span><div class="equation"><label for="answer-${i}"><span class="sr-only">第 ${i + 1} 题：</span>${esc(expression)} <span class="operator">＝</span></label><input id="answer-${i}" name="answer-${i}" type="number" min="0" max="${a.answerMax}" step="1" inputmode="numeric" autocomplete="off" aria-label="第 ${i + 1} 题答案" value="${esc(a.answers[i])}" ${done ? 'readonly' : ''}></div>${done ? `<div class="question-feedback">${a.results[i].correct ? '✓ 答对了' : `✕ 正确答案：${a.results[i].correctAnswer}`}</div>` : ''}</div>`).join('')}</div></fieldset>
+    ${done ? '<div class="actions result-actions"><a class="button secondary" href="#/">返回我的作业</a><span class="muted">作业已提交，答案不能再修改。</span></div>' : `<div class="answer-actions"><div><strong>慢慢算，认真检查。</strong><p class="small muted">保存草稿后，下次登录可以接着写。</p></div><div class="actions"><button type="button" class="button secondary" data-action="save">保存草稿</button><button type="submit" class="button" data-submit>提交作业 →</button></div></div><p id="answer-error" class="form-error" role="alert"></p>`}</form>`;
 }
 function render() {
   let view;
@@ -86,6 +100,7 @@ function render() {
   else if (state.assignment) view = state.user.role === 'teacher' ? reportView(state.assignment) : workbook(state.assignment);
   else view = state.user.role === 'teacher' ? teacherHome() : studentHome();
   root.innerHTML = `${header()}${state.user ? `<main class="main">${view}</main>` : view}<footer>小小算术 <span>·</span> 每天进步一点点</footer>`;
+  syncDeadlineUI();
 }
 async function load() {
   if (!state.user) { render(); return; }
@@ -127,22 +142,26 @@ root.addEventListener('submit', async event => {
     history.replaceState(null, '', '#/'); await load();
   });
   if (form.id === 'publish-form') await formAction(form, 'publish-error', async data => {
-    const a = await api('/assignments', 'POST', data); toast('作业已发布，全班学生可以开始作答。');
+    const a = await api('/assignments', 'POST', { ...data, questionCount: Number(data.questionCount), dueAt: data.dueAt ? `${data.dueAt}+08:00` : null }); toast('作业已发布，全班学生可以开始作答。');
     location.hash = `#/assignment/${a.id}`;
   });
   if (form.id === 'student-form') await formAction(form, 'student-error', async data => {
     const student = await api('/students', 'POST', data); await load(); toast(`已创建 ${student.name} 的账号：${student.username}`);
   });
-  if (form.id === 'answer-form' && !state.busy) dialog.showModal();
+  if (form.id === 'answer-form' && !state.busy) {
+    if (closed(state.assignment)) { syncDeadlineUI(); errorAt('answer-error', closedMessage); }
+    else dialog.showModal();
+  }
 });
 async function saveAnswers(submit = false) {
   if (state.busy || !state.assignment || state.assignment.submittedAt) return;
+  if (submit && closed(state.assignment)) { syncDeadlineUI(); errorAt('answer-error', closedMessage); return; }
   const form = document.querySelector('#answer-form');
   if (!form.reportValidity()) return;
-  const answers = Array.from({ length: 10 }, (_, i) => {
+  const answers = Array.from({ length: state.assignment.questionCount }, (_, i) => {
     const value = form.elements[`answer-${i}`].value; return value === '' ? null : Number(value);
   });
-  if (submit && answers.includes(null)) { errorAt('answer-error', '还有题目未作答，请完成全部 10 题再提交。'); document.querySelector(`#answer-${answers.indexOf(null)}`).focus(); return; }
+  if (submit && answers.includes(null)) { errorAt('answer-error', `还有题目未作答，请完成全部 ${state.assignment.questionCount} 题再提交。`); document.querySelector(`#answer-${answers.indexOf(null)}`).focus(); return; }
   state.busy = true;
   const fieldset = form.querySelector('fieldset'); fieldset.disabled = true;
   form.querySelectorAll('button').forEach(b => { b.disabled = true; });
@@ -150,8 +169,11 @@ async function saveAnswers(submit = false) {
   try {
     state.assignment = await api(`/assignments/${state.assignment.id}/${submit ? 'submit' : 'draft'}`, submit ? 'POST' : 'PUT', { answers });
     state.dirty = false; render(); toast(submit ? '作业已提交，批改结果出来啦！' : '草稿已保存，下次可以接着写。');
-  } catch (e) { errorAt('answer-error', e.message); }
-  finally { state.busy = false; fieldset.disabled = false; form.querySelectorAll('button').forEach(b => { b.disabled = false; }); }
+  } catch (e) {
+    if (submit && e.status === 409) state.assignment.isClosed = true;
+    errorAt('answer-error', e.message);
+  }
+  finally { state.busy = false; fieldset.disabled = false; form.querySelectorAll('button').forEach(b => { b.disabled = false; }); syncDeadlineUI(); }
 }
 root.addEventListener('input', event => {
   if (event.target.closest('#answer-form')) {
@@ -159,7 +181,7 @@ root.addEventListener('input', event => {
     const inputs = [...document.querySelectorAll('.equation input')];
     const count = inputs.filter(input => input.value !== '').length;
     document.querySelector('#progress').value = count;
-    document.querySelector('#progress-label').textContent = `已作答 ${count} / 10 题`;
+    document.querySelector('#progress-label').textContent = `已作答 ${count} / ${state.assignment.questionCount} 题`;
     document.querySelector('#save-state').textContent = '有未保存的修改';
   }
 });
@@ -189,3 +211,6 @@ window.addEventListener('hashchange', async () => {
 window.addEventListener('beforeunload', event => { if (state.dirty || state.busy) { event.preventDefault(); event.returnValue = ''; } });
 try { state.user = await api('/me'); } catch (e) { if (!e.message.includes('请先登录')) toast(e.message, true); }
 await load();
+
+setInterval(syncDeadlineUI, 1000);
+window.addEventListener('focus', syncDeadlineUI);

@@ -1,4 +1,5 @@
-import { hashPassword, openStore } from '../backend/store.mjs';
+import { DatabaseSync } from 'node:sqlite';
+import { hashPassword } from '../backend/store.mjs';
 
 const q = (a, op, b) => ({ a, op, b });
 export const historyAssignments = [
@@ -36,10 +37,31 @@ export function snapshot(db) {
 
 // Build and close a synthetic class before the application opens it.
 export async function createHistoryClass(path) {
-  const db = await openStore(path, teacherPassword);
+  // Keep the historical schema independent of the current application's migrations.
+  const db = new DatabaseSync(path);
   try {
-    db.exec(`ALTER TABLE assignments ADD COLUMN category TEXT NOT NULL DEFAULT 'add-sub-20';
-      ALTER TABLE assignments ADD COLUMN due_at TEXT;`);
+    db.exec(`
+      PRAGMA foreign_keys = ON;
+      CREATE TABLE users (
+        id INTEGER PRIMARY KEY, username TEXT NOT NULL UNIQUE,
+        name TEXT NOT NULL, password_hash TEXT NOT NULL,
+        role TEXT NOT NULL CHECK(role IN ('teacher','student'))
+      );
+      CREATE TABLE sessions (
+        token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), expires INTEGER NOT NULL
+      );
+      CREATE TABLE assignments (
+        id INTEGER PRIMARY KEY, title TEXT NOT NULL, questions TEXT NOT NULL, created_at TEXT NOT NULL,
+        category TEXT NOT NULL DEFAULT 'add-sub-20', due_at TEXT
+      );
+      CREATE TABLE submissions (
+        assignment_id INTEGER NOT NULL REFERENCES assignments(id), student_id INTEGER NOT NULL REFERENCES users(id),
+        answers TEXT NOT NULL, saved_at TEXT NOT NULL, submitted_at TEXT, score INTEGER,
+        PRIMARY KEY(assignment_id, student_id)
+      );
+    `);
+    db.prepare("INSERT INTO users(username,name,password_hash,role) VALUES('teacher','数学老师',?,'teacher')")
+      .run(await hashPassword(teacherPassword));
     const insertUser = db.prepare("INSERT INTO users(id, username, name, password_hash, role) VALUES(?,?,?,?, 'student')");
     for (const id of [2, 3, 4]) {
       insertUser.run(id, `pupil${id}`, `同学${id}`, await hashPassword(studentPassword));

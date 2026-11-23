@@ -5,3 +5,7 @@
 @media(prefers-reduced-motion:reduce){*{transition:none!important;scroll-behavior:auto!important}}
 .equation { flex-wrap: wrap; }
 .equation label { white-space: normal; text-align: center; }
+
+select{font:inherit;display:block;width:100%;border:1px solid #cbd6e8;border-radius:8px;background:#fff;padding:13px 12px;color:var(--ink);margin-top:9px;min-width:0}select:focus-visible{outline:3px solid #e6ae13;outline-offset:4px}
+
+.deadline-message{background:#fff2c9;color:#866016;border-radius:9px;padding:16px 20px;font-size:13px}.badge.overdue{background:#fbe8e4;color:#a33d2a}button[data-submit]:disabled{cursor:not-allowed}

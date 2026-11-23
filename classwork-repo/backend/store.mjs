@@ -15,27 +15,53 @@ export async function verifyPassword(password, stored) {
   const actual = await scrypt(password, salt, 64);
   return timingSafeEqual(actual, Buffer.from(expected, 'hex'));
 }
-export function generateQuestions() {
+export const categories = ['add-sub-20', 'mul-div-20', 'mixed-100'];
+export const questionCounts = [10, 20, 50];
+
+function binaryQuestion(op, max) {
+  const a = randomInt(0, max + 1);
+  const candidates = Array.from({ length: max + 1 }, (_, b) => b).filter(b => {
+    const value = operators[op].apply(a, b);
+    return (op !== '/' || b !== 0) && Number.isInteger(value) && value >= 0 && value <= max;
+  });
+  if (!candidates.length) return binaryQuestion(op, max);
+  return { a, b: candidates[randomInt(candidates.length)], op };
+}
+export function generateQuestions(category = 'add-sub-20', questionCount = 10) {
+  if (!categories.includes(category) || !questionCounts.includes(questionCount)) throw new Error('无效的作业题型或题量');
   const questions = [];
   const used = new Set();
-  while (questions.length < 10) {
-    const op = questions.length % 2 === 0 ? '+' : '-';
-    const a = randomInt(0, 21);
-    const b = randomInt(0, op === '+' ? 21 - a : a + 1);
-    const key = `${a}${op}${b}`;
+  while (questions.length < questionCount) {
+    let q;
+    if (category === 'mixed-100') {
+      const ops = ['+', '-', '*', '/'];
+      const inner = binaryQuestion(ops[questions.length % 4], 100);
+      const op = ops[(questions.length + 1) % 4];
+      const right = randomInt(2) === 1;
+      const value = solution(inner);
+      const candidates = Array.from({ length: 101 }, (_, n) => n).filter(n => {
+        const a = right ? n : value, b = right ? value : n;
+        const result = operators[op].apply(a, b);
+        return (op !== '/' || b !== 0) && Number.isInteger(result) && result >= 0 && result <= 100;
+      });
+      if (!candidates.length) continue;
+      const n = candidates[randomInt(candidates.length)];
+      q = { a: right ? n : inner, b: right ? inner : n, op };
+    } else {
+      const ops = category === 'add-sub-20' ? ['+', '-'] : ['*', '/'];
+      q = binaryQuestion(ops[questions.length % 2], 20);
+    }
+    const key = JSON.stringify(q);
     if (used.has(key)) continue;
     used.add(key);
-    questions.push({ a, b, op });
+    questions.push(q);
   }
   return questions;
 }
 
-export function publishAssignment(db, title) {
-  const hasCategory = db.prepare("SELECT 1 FROM pragma_table_info('assignments') WHERE name='category'").get();
-  const insert = hasCategory
-    ? "INSERT INTO assignments(title,questions,created_at,category) VALUES(?,?,?,'add-sub-20')"
-    : 'INSERT INTO assignments(title,questions,created_at) VALUES(?,?,?)';
-  const result = db.prepare(insert).run(title, JSON.stringify(generateQuestions()), new Date().toISOString());
+export function publishAssignment(db, title, { category = 'add-sub-20', questionCount = 10, dueAt = null } = {}) {
+  const result = db.prepare('INSERT INTO assignments(title,questions,created_at,category,due_at) VALUES(?,?,?,?,?)')
+    .run(title, JSON.stringify(generateQuestions(category, questionCount)), new Date().toISOString(), category, dueAt);
   return Number(result.lastInsertRowid);
 }
 
@@ -97,6 +123,12 @@ export async function openStore(path, teacherPassword = 'Teacher123!') {
       PRIMARY KEY(assignment_id, student_id)
     );
   `);
+  if (!db.prepare("SELECT 1 FROM pragma_table_info('assignments') WHERE name='category'").get()) {
+    db.exec('ALTER TABLE assignments ADD COLUMN category TEXT');
+  }
+  if (!db.prepare("SELECT 1 FROM pragma_table_info('assignments') WHERE name='due_at'").get()) {
+    db.exec('ALTER TABLE assignments ADD COLUMN due_at TEXT');
+  }
   if (!db.prepare("SELECT id FROM users WHERE role='teacher'").get()) {
     db.prepare('INSERT INTO users(username,name,password_hash,role) VALUES(?,?,?,?)')
       .run('teacher', '数学老师', await hashPassword(teacherPassword), 'teacher');
