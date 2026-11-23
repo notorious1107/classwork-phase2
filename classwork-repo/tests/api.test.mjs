@@ -1,11 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { copyFile, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { request as httpRequest } from 'node:http';
 import { createApp } from '../backend/app.mjs';
 import { generateQuestions, solution } from '../backend/store.mjs';
+import { createHistoryClass, historyAssignments, historyDraft, snapshot, studentPassword, teacherPassword } from './history-fixture.mjs';
 
 test('题目符合范围、配比与去重规则', () => {
   for (let round = 0; round < 100; round++) {
@@ -19,20 +20,7 @@ test('题目符合范围、配比与去重规则', () => {
   }
 });
 
-test('真实 HTTP 师生流程、权限、统计与重启持久化', async t => {
-  const dir = await mkdtemp(join(tmpdir(), 'classwork-test-'));
-  const dbPath = join(dir, 'test.sqlite');
-  let app, base;
-  async function start() {
-    app = await createApp({ dbPath, logger: { error: e => { throw e; } } });
-    await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve));
-    base = `http://127.0.0.1:${app.server.address().port}`;
-  }
-  async function stop() {
-    app.server.closeAllConnections();
-    await new Promise(resolve => app.server.close(resolve));
-    app.db.close();
-  }
+function apiClient(base) {
   async function request(path, { method = 'GET', data, cookie, headers = {} } = {}) {
     const res = await fetch(base + path, { method, headers: {
       ...(data !== undefined ? { 'Content-Type': 'application/json' } : {}),
@@ -44,6 +32,24 @@ test('真实 HTTP 师生流程、权限、统计与重启持久化', async t => 
     const result = await request('/api/login', { method: 'POST', data: { username, password } });
     assert.equal(result.status, 200);
     return result.cookie;
+  }
+  return { request, login };
+}
+
+test('真实 HTTP 师生流程、权限、统计与重启持久化', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'classwork-test-'));
+  const dbPath = join(dir, 'test.sqlite');
+  let app, base, request, login;
+  async function start() {
+    app = await createApp({ dbPath, logger: { error: e => { throw e; } } });
+    await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve));
+    base = `http://127.0.0.1:${app.server.address().port}`;
+    ({ request, login } = apiClient(base));
+  }
+  async function stop() {
+    app.server.closeAllConnections();
+    await new Promise(resolve => app.server.close(resolve));
+    app.db.close();
   }
   let teacher, alice, bob, id, correct;
   await start();
@@ -78,6 +84,7 @@ test('真实 HTTP 师生流程、权限、统计与重启持久化', async t => 
       assert.equal((await request('/api/assignments', { method: 'POST', cookie: alice, data: { title: '越权' } })).status, 403);
       assert.equal((await request(`/api/assignments/${id}/report`, { cookie: alice })).status, 403);
       const view = (await request(`/api/assignments/${id}`, { cookie: alice })).body;
+      assert.equal(view.category, 'add-sub-20'); assert.equal(view.answerMax, 20);
       assert.equal(view.questions.length, 10); assert.equal(view.results, undefined);
       assert.equal(view.students, undefined); assert.equal(view.score, null);
       assert.equal((await request('/api/assignments/9999', { cookie: alice })).status, 404);
@@ -118,8 +125,11 @@ test('真实 HTTP 师生流程、权限、统计与重启持久化', async t => 
       assert.equal(report.total, 3); assert.equal(report.pending, 1); assert.equal(report.average, 95);
       await request(`/api/assignments/${id}/draft`, { method: 'PUT', cookie: carol, data: { answers: [1, ...Array(9).fill(null)] } });
     });
-    await t.test('重启保留账号、会话、作业、草稿及成绩', async () => {
+    await t.test('重开无类别列的首版旧库，保留账号、会话、题目、草稿及成绩', async () => {
+      const before = snapshot(app.db);
+      assert.ok(!app.db.prepare('PRAGMA table_info(assignments)').all().some(column => column.name === 'category'));
       await stop(); await start();
+      assert.deepEqual(snapshot(app.db), before);
       assert.equal((await request('/api/me', { cookie: teacher })).status, 200);
       const report = (await request(`/api/assignments/${id}/report`, { cookie: teacher })).body;
       assert.equal(report.average, 95); assert.equal(report.students.length, 3);
@@ -129,6 +139,7 @@ test('真实 HTTP 师生流程、权限、统计与重启持久化', async t => 
     });
     await t.test('延迟到达的草稿和重复提交不能覆盖已交结果', async () => {
       const published = await request('/api/assignments', { method: 'POST', cookie: teacher, data: { title: '并发提交检查' } });
+      assert.equal(published.status, 201); assert.equal(published.body.category, 'add-sub-20');
       const raceId = published.body.id;
       const answers = published.body.questions.map(solution);
       const wrong = answers.map(v => (v + 1) % 21);
@@ -165,4 +176,94 @@ test('真实 HTTP 师生流程、权限、统计与重启持久化', async t => 
       assert.equal((await request('/api/me', { cookie: teacher })).status, 401);
     });
   } finally { await stop(); await rm(dir, { recursive: true, force: true }); }
+});
+
+test('INC-001 已有班级在合成迁移库副本上继续使用', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'classwork-import-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const backup = join(dir, 'backup.sqlite'), dbPath = join(dir, 'class.sqlite');
+  const before = await createHistoryClass(backup);
+  await copyFile(backup, dbPath);
+  const { db, server } = await createApp({ dbPath });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const { request, login } = apiClient(`http://127.0.0.1:${server.address().port}`);
+  try {
+    const teacher = await login('teacher', teacherPassword);
+    const students = [];
+    for (const id of [2, 3, 4]) students.push(await login(`pupil${id}`, studentPassword));
+    await t.test('原密码可登录，三份原题、六条成绩与一份草稿按原值读取', async () => {
+      const roster = await request('/api/students', { cookie: teacher });
+      assert.deepEqual(roster.body.map(s => s.username), ['pupil2', 'pupil3', 'pupil4']);
+      const list = await request('/api/assignments', { cookie: teacher });
+      assert.equal(list.body.length, 3);
+      for (const a of historyAssignments) {
+        const report = (await request(`/api/assignments/${a.id}/report`, { cookie: teacher })).body;
+        assert.deepEqual(list.body.find(row => row.id === a.id), report);
+        assert.equal(report.category, a.category);
+        assert.deepEqual(report.questions, a.questions);
+        assert.equal(report.submitted, 2); assert.equal(report.pending, 1);
+        const stored = before.submissions.filter(s => s.assignment_id === a.id && s.submitted_at);
+        assert.equal(report.average, (stored[0].score + stored[1].score) / 2);
+        for (const [i, row] of stored.entries()) {
+          const cookie = students[i];
+          const path = `/api/assignments/${a.id}`;
+          const view = (await request(path, { cookie })).body;
+          assert.deepEqual(view.answers, JSON.parse(row.answers));
+          assert.equal(view.savedAt, row.saved_at); assert.equal(view.submittedAt, row.submitted_at);
+          assert.deepEqual(view.results, a.key.map((correctAnswer, j) => ({ correctAnswer, correct: correctAnswer === view.answers[j] })));
+          assert.equal(view.results.filter(r => r.correct).length * 10, row.score);
+          assert.equal(view.score, row.score); assert.equal(report.students[i].score, row.score);
+          const retry = await request(path + '/submit', { method: 'POST', cookie, data: { answers: a.key } });
+          assert.equal(retry.status, 200); assert.deepEqual(retry.body, view);
+          assert.equal((await request(path + '/draft', { method: 'PUT', cookie, data: { answers: a.key } })).status, 409);
+        }
+      }
+      assert.deepEqual(snapshot(db), before);
+    });
+    const cookie = students[2];
+    await t.test('混合题草稿续答、范围校验、提交与教师汇总', async () => {
+      const path = '/api/assignments/33';
+      const get = async () => (await request(path, { cookie })).body;
+      const put = answers => request(path + '/draft', { method: 'PUT', cookie, data: { answers } });
+      const submit = answers => request(path + '/submit', { method: 'POST', cookie, data: { answers } });
+      const draft = await get();
+      assert.deepEqual(draft.answers, historyDraft); assert.equal(draft.results, undefined);
+      assert.equal(draft.answerMax, 100);
+      for (const value of [-1, 101, 1.5, '27']) {
+        assert.equal((await put([value, ...historyDraft.slice(1)])).status, 400);
+      }
+      const partial = [27, ...historyDraft.slice(1)];
+      assert.equal((await put(partial)).status, 200);
+      assert.deepEqual((await get()).answers, partial);
+      assert.equal((await submit(partial)).status, 400);
+      const answers = [...historyAssignments[2].key]; answers[1] = 17;
+      const marked = await submit(answers);
+      assert.equal(marked.status, 200); assert.equal(marked.body.score, 90);
+      assert.deepEqual(marked.body.results[1], { correct: false, correctAnswer: 13 });
+      assert.equal((await put(partial)).status, 409);
+      const report = (await request(path + '/report', { cookie: teacher })).body;
+      assert.deepEqual(report.students.map(s => s.score), [80, 70, 90]);
+      assert.equal(report.average, 80);
+    });
+    await t.test('未开始的乘除题仍校验 0–20，新发布仍是十道加减', async () => {
+      const path = '/api/assignments/22';
+      const blank = (await request(path, { cookie })).body;
+      assert.deepEqual(blank.answers, Array(10).fill(null)); assert.equal(blank.answerMax, 20);
+      assert.equal((await request(path + '/draft', { method: 'PUT', cookie, data: { answers: Array(10).fill(21) } })).status, 400);
+      const marked = await request(path + '/submit', { method: 'POST', cookie, data: { answers: historyAssignments[1].key } });
+      assert.equal(marked.status, 200); assert.equal(marked.body.score, 100);
+      const published = await request('/api/assignments', { method: 'POST', cookie: teacher, data: { title: '迁移后的第一份新作业' } });
+      assert.equal(published.status, 201);
+      assert.equal(published.body.category, 'add-sub-20'); assert.equal(published.body.answerMax, 20);
+      for (const op of ['+', '-']) assert.equal(published.body.questions.filter(q => q.op === op).length, 5);
+      const freshPath = `/api/assignments/${published.body.id}/submit`;
+      assert.equal((await request(freshPath, { method: 'POST', cookie, data: { answers: Array(10).fill(27) } })).status, 400);
+      const after = snapshot(db);
+      assert.deepEqual(after.users, before.users);
+      assert.deepEqual(after.assignments.slice(0, 3), before.assignments);
+      assert.deepEqual(after.submissions.filter(s => s.student_id !== 4), before.submissions.filter(s => s.submitted_at));
+    });
+  } finally {
+    server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); db.close();
+  }
 });

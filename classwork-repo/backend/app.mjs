@@ -1,6 +1,6 @@
 import { createServer } from 'node:http';
 import { createHash, randomBytes } from 'node:crypto';
-import { openStore, hashPassword, verifyPassword, generateQuestions, solution } from './store.mjs';
+import { openStore, hashPassword, verifyPassword, publishAssignment, solution, formatExpression, inferCategory } from './store.mjs';
 
 class HttpError extends Error {
   constructor(status, message) { super(message); this.status = status; }
@@ -30,13 +30,23 @@ function textField(value, label, min, max) {
   }
   return value.trim();
 }
-function validateAnswers(answers, complete) {
+function validateAnswers(answers, complete, answerMax) {
   if (!Array.isArray(answers) || answers.length !== 10 ||
-      answers.some(a => a !== null && (!Number.isInteger(a) || a < 0 || a > 20))) {
-    fail(400, '请填写 0–20 的整数，每份作业共 10 题');
+      answers.some(a => a !== null && (!Number.isInteger(a) || a < 0 || a > answerMax))) {
+    fail(400, `请填写 0–${answerMax} 的整数，每份作业共 10 题`);
   }
   if (complete && answers.includes(null)) fail(400, '还有题目未作答，请完成全部 10 题再提交');
   return answers;
+}
+
+function readAssignment(row) {
+  const questions = JSON.parse(row.questions);
+  const category = row.category ?? inferCategory(questions);
+  return {
+    id: row.id, title: row.title, createdAt: row.created_at, category,
+    answerMax: category === 'mixed-100' ? 100 : 20,
+    questions, expressions: questions.map(q => formatExpression(q))
+  };
 }
 
 export async function createApp({ dbPath = 'data/classwork.sqlite', teacherPassword, logger = console } = {}) {
@@ -48,16 +58,17 @@ export async function createApp({ dbPath = 'data/classwork.sqlite', teacherPassw
   function assignment(id) {
     const row = db.prepare('SELECT * FROM assignments WHERE id=?').get(id);
     if (!row) fail(404, '作业不存在');
-    return { ...row, questions: JSON.parse(row.questions) };
+    return readAssignment(row);
   }
   function studentView(a, studentId) {
     const s = db.prepare('SELECT * FROM submissions WHERE assignment_id=? AND student_id=?').get(a.id, studentId);
-    const result = { id: a.id, title: a.title, createdAt: a.created_at, questions: a.questions,
+    const result = { ...a,
       answers: s ? JSON.parse(s.answers) : Array(10).fill(null), savedAt: s?.saved_at ?? null,
       submittedAt: s?.submitted_at ?? null, score: s?.score ?? null };
-    if (s?.submitted_at) result.results = a.questions.map((q, i) => ({
-      correctAnswer: solution(q), correct: result.answers[i] === solution(q)
-    }));
+    if (s?.submitted_at) result.results = a.questions.map((q, i) => {
+      const correctAnswer = solution(q);
+      return { correctAnswer, correct: result.answers[i] === correctAnswer };
+    });
     return result;
   }
   function report(a) {
@@ -68,7 +79,7 @@ export async function createApp({ dbPath = 'data/classwork.sqlite', teacherPassw
         submittedAt: s.submitted_at ?? null, savedAt: s.saved_at ?? null, score: s.score ?? null
       }));
     const submitted = students.filter(s => s.submittedAt);
-    return { id: a.id, title: a.title, createdAt: a.created_at, questions: a.questions,
+    return { ...a,
       students, total: students.length, submitted: submitted.length,
       pending: students.length - submitted.length,
       average: submitted.length ? Math.round(submitted.reduce((sum, s) => sum + s.score, 0) / submitted.length * 10) / 10 : null };
@@ -142,16 +153,15 @@ export async function createApp({ dbPath = 'data/classwork.sqlite', teacherPassw
       }
       if (path === '/api/assignments') {
         if (req.method === 'GET') {
-          const list = db.prepare('SELECT * FROM assignments ORDER BY id DESC').all().map(a => ({ ...a, questions: JSON.parse(a.questions) }));
+          const list = db.prepare('SELECT * FROM assignments ORDER BY id DESC').all().map(readAssignment);
           return send(200, list.map(a => user.role === 'teacher' ? report(a) : studentView(a, user.id)));
         }
         if (req.method === 'POST') {
           requireRole(user, 'teacher');
           const input = await body(req);
           const title = textField(input.title, '作业名称', 1, 60);
-          const questions = generateQuestions();
-          const result = db.prepare('INSERT INTO assignments(title,questions,created_at) VALUES(?,?,?)').run(title, JSON.stringify(questions), now());
-          return send(201, report(assignment(Number(result.lastInsertRowid))));
+          const id = publishAssignment(db, title);
+          return send(201, report(assignment(id)));
         }
       }
       const match = path.match(/^\/api\/assignments\/([1-9]\d*)(?:\/(draft|submit|report))?$/);
@@ -172,7 +182,7 @@ export async function createApp({ dbPath = 'data/classwork.sqlite', teacherPassw
             fail(409, '作业已提交，不能再修改答案');
           }
           const input = await body(req);
-          const answers = validateAnswers(input.answers, action === 'submit');
+          const answers = validateAnswers(input.answers, action === 'submit', a.answerMax);
           const score = action === 'submit' ? a.questions.reduce((sum, q, i) => sum + (solution(q) === answers[i] ? 10 : 0), 0) : null;
           const savedAt = now();
           const written = db.prepare(`INSERT INTO submissions(assignment_id,student_id,answers,saved_at,submitted_at,score)

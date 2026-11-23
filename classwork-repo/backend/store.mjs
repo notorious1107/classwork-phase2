@@ -29,7 +29,46 @@ export function generateQuestions() {
   }
   return questions;
 }
-export const solution = q => q.op === '+' ? q.a + q.b : q.a - q.b;
+
+export function publishAssignment(db, title) {
+  const hasCategory = db.prepare("SELECT 1 FROM pragma_table_info('assignments') WHERE name='category'").get();
+  const insert = hasCategory
+    ? "INSERT INTO assignments(title,questions,created_at,category) VALUES(?,?,?,'add-sub-20')"
+    : 'INSERT INTO assignments(title,questions,created_at) VALUES(?,?,?)';
+  const result = db.prepare(insert).run(title, JSON.stringify(generateQuestions()), new Date().toISOString());
+  return Number(result.lastInsertRowid);
+}
+
+const operators = {
+  '+': { symbol: '＋', precedence: 1, apply: (a, b) => a + b },
+  '-': { symbol: '−', precedence: 1, apply: (a, b) => a - b },
+  '*': { symbol: '×', precedence: 2, apply: (a, b) => a * b },
+  '/': { symbol: '÷', precedence: 2, apply: (a, b) => a / b }
+};
+const aliases = { '＋': '+', '−': '-', '×': '*', '÷': '/' };
+function operator(op) {
+  const key = aliases[op] ?? op;
+  if (!Object.hasOwn(operators, key)) throw new Error('题目含有未知的运算符');
+  return operators[key];
+}
+export function solution(q) {
+  if (typeof q === 'number') return q;
+  return operator(q.op).apply(solution(q.a), solution(q.b));
+}
+export function inferCategory(questions) {
+  if (questions.some(q => typeof q.a !== 'number' || typeof q.b !== 'number')) return 'mixed-100';
+  const productsOrQuotients = questions.filter(q => operator(q.op).precedence === 2).length;
+  if (productsOrQuotients === 0) return 'add-sub-20';
+  return productsOrQuotients === questions.length ? 'mul-div-20' : 'mixed-100';
+}
+export function formatExpression(q, parentPrecedence = 0, right = false) {
+  if (typeof q === 'number') return String(q);
+  const { symbol, precedence } = operator(q.op);
+  const expression = `${formatExpression(q.a, precedence)} ${symbol} ${formatExpression(q.b, precedence, true)}`;
+  // Equal-precedence operations normally group from the left.
+  return precedence < parentPrecedence || (right && precedence === parentPrecedence)
+    ? `(${expression})` : expression;
+}
 
 export async function openStore(path, teacherPassword = 'Teacher123!') {
   if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });

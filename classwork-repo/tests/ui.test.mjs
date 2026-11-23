@@ -7,6 +7,7 @@ import { JSDOM } from 'jsdom';
 import { createApp } from '../backend/app.mjs';
 import { createWebServer } from '../frontend/server.mjs';
 import { solution } from '../backend/store.mjs';
+import { createHistoryClass, historyAssignments, studentPassword, teacherPassword } from './history-fixture.mjs';
 
 const html = await readFile(new URL('../frontend/index.html', import.meta.url), 'utf8');
 const source = await readFile(new URL('../frontend/app.mjs', import.meta.url), 'utf8');
@@ -17,9 +18,11 @@ const waitFor = async (predicate, label) => {
     await new Promise(resolve => setTimeout(resolve, 10));
   }
 };
-test('页面表单经独立前端代理完成师生全流程（DOM 环境，无视觉渲染）', async t => {
+async function withPages(run, seed) {
   const dir = await mkdtemp(join(tmpdir(), 'classwork-ui-'));
-  const app = await createApp({ dbPath: join(dir, 'ui.sqlite') });
+  const dbPath = join(dir, 'ui.sqlite');
+  if (seed) await seed(dbPath);
+  const app = await createApp({ dbPath });
   await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve));
   const web = createWebServer({ apiPort: app.server.address().port });
   await new Promise(resolve => web.listen(0, '127.0.0.1', resolve));
@@ -53,8 +56,17 @@ test('页面表单经独立前端代理完成师生全流程（DOM 环境，无�
     p.fill('username', username); p.fill('password', password); p.submit('login-form');
     await waitFor(() => p.d.querySelector('[data-action="logout"]') && !p.d.querySelector('.loading'), '登录');
   }
-  let teacher, student, other, id;
-  try {
+  try { await run({ app, base, page, login }); }
+  finally {
+    windows.forEach(w => w.close());
+    web.closeAllConnections(); app.server.closeAllConnections();
+    await Promise.all([new Promise(resolve => web.close(resolve)), new Promise(resolve => app.server.close(resolve))]);
+    app.db.close(); await rm(dir, { recursive: true, force: true });
+  }
+}
+test('页面表单经独立前端代理完成师生全流程（DOM 环境，无视觉渲染）', async t => {
+  await withPages(async ({ app, base, page, login }) => {
+    let teacher, student, other, id;
     await t.test('静态资源、代理、CSP 和路径隔离', async () => {
       for (const path of ['/', '/app.mjs', '/style.css']) {
         const response = await fetch(base + path); assert.equal(response.status, 200);
@@ -92,6 +104,8 @@ test('页面表单经独立前端代理完成师生全流程（DOM 环境，无�
       assert.equal(student.d.querySelector('a[href="#/students"]'), null);
       student.click('.student-card');
       await waitFor(() => student.d.querySelector('#answer-form'), '打开作业');
+      student.fill('answer-0', 21);
+      assert.equal(student.d.querySelector('#answer-0').validity.rangeOverflow, true);
       student.fill('answer-0', 4);
       assert.equal(student.d.querySelector('#progress').value, 1);
       student.w.confirm = () => false;
@@ -144,10 +158,63 @@ test('页面表单经独立前端代理完成师生全流程（DOM 环境，无�
       await waitFor(() => student.d.querySelector('.student-card'), '加载重试');
       assert.ok(student.d.querySelector('.student-card').textContent.includes('90'));
     });
-  } finally {
-    windows.forEach(w => w.close());
-    web.closeAllConnections(); app.server.closeAllConnections();
-    await Promise.all([new Promise(resolve => web.close(resolve)), new Promise(resolve => app.server.close(resolve))]);
-    app.db.close(); await rm(dir, { recursive: true, force: true });
-  }
+  });
+});
+
+test('INC-001 师生页面显示历史算式、续做混合草稿并回看批改', async () => {
+  await withPages(async ({ page, login }) => {
+    const teacher = await page(), pupil = await page();
+    await login(teacher, 'teacher', teacherPassword);
+    await login(pupil, 'pupil4', studentPassword);
+    const card = id => `.assignment-card[href="#/assignment/${id}"]`;
+    for (const p of [teacher, pupil]) {
+      for (const [id, label] of [[11, '20 以内加减'], [22, '20 以内乘除'], [33, '100 以内混合运算']]) {
+        assert.ok(p.d.querySelector(card(id)).textContent.includes(label));
+      }
+    }
+    teacher.click(card(22));
+    await waitFor(() => teacher.d.querySelector('.question-preview'), '教师查看乘除题');
+    const productPreview = teacher.d.querySelectorAll('.question-preview span');
+    assert.ok(productPreview[0].textContent.includes('2 × 1')); assert.ok(productPreview[1].textContent.includes('18 ÷ 3'));
+    const graded = await page(); await login(graded, 'pupil3', studentPassword);
+    graded.click(card(22));
+    await waitFor(() => graded.d.querySelector('.score-stamp'), '学生回看已批乘除题');
+    assert.ok(graded.d.querySelector('.equation label').textContent.includes('2 × 1'));
+    assert.ok(graded.d.querySelector('.question-feedback').textContent.includes('正确答案：2'));
+    assert.equal(graded.d.querySelector('.score-stamp strong').textContent, '80');
+    assert.equal(graded.d.querySelector('fieldset').disabled, true);
+
+    teacher.click('.back-link'); await waitFor(() => teacher.d.querySelector(card(33)), '返回教师列表');
+    teacher.click(card(33)); pupil.click(card(33));
+    await waitFor(() => teacher.d.querySelector('.question-preview') && pupil.d.querySelector('#answer-form'), '师生打开混合题');
+    assert.ok(teacher.d.querySelector('.page-title p').textContent.includes('100 以内混合运算'));
+    assert.ok(pupil.d.querySelector('.page-title p').textContent.includes('答案是 0–100 的整数'));
+    const preview = teacher.d.querySelectorAll('.question-preview span');
+    const labels = pupil.d.querySelectorAll('.equation label');
+    for (const [i, expected] of [[1, '18 − (7 − 2)'], [2, '24 ÷ (12 ÷ 3)'], [4, '(6 ＋ 3) × 4'], [8, '60 ÷ (5 − 2)']]) {
+      assert.ok(preview[i].textContent.includes(expected)); assert.ok(labels[i].textContent.includes(expected));
+    }
+    assert.equal(pupil.d.querySelector('#answer-1').value, '13');
+    assert.equal(pupil.d.querySelector('#answer-0').value, '');
+    pupil.fill('answer-0', 101); assert.equal(pupil.d.querySelector('#answer-form').checkValidity(), false);
+    pupil.fill('answer-0', 27); assert.equal(pupil.d.querySelector('#answer-form').checkValidity(), true);
+    pupil.click('[data-action="save"]');
+    await waitFor(() => pupil.d.querySelector('#save-state').textContent.includes('草稿保存于'), '保存 27');
+    pupil.w.close();
+    const resumed = await page(pupil.session, '#/assignment/33');
+    assert.equal(resumed.d.querySelector('#answer-0').value, '27');
+    assert.equal(resumed.d.querySelector('#answer-1').value, '13');
+    assert.equal(resumed.d.querySelector('#answer-2').value, '');
+    historyAssignments[2].key.forEach((value, i) => resumed.fill(`answer-${i}`, i === 1 ? 17 : value));
+    resumed.submit('answer-form'); resumed.click('#confirm-submit');
+    await waitFor(() => resumed.d.querySelector('.score-stamp'), '混合运算批改');
+    assert.equal(resumed.d.querySelector('.score-stamp strong').textContent, '90');
+    assert.equal(resumed.d.querySelectorAll('.question.correct').length, 9);
+    assert.ok(resumed.d.querySelector('.incorrect .question-feedback').textContent.includes('正确答案：13'));
+    assert.equal(resumed.d.querySelector('[data-action="save"]'), null);
+    teacher.click('[data-action="refresh"]');
+    await waitFor(() => teacher.d.querySelectorAll('.score-cell')[2]?.textContent === '90', '教师查看新增成绩');
+    assert.deepEqual([...teacher.d.querySelectorAll('.score-cell')].map(el => el.textContent), ['80', '70', '90']);
+    assert.ok(teacher.d.querySelector('.report-stats div:last-child strong').textContent.startsWith('80'));
+  }, createHistoryClass);
 });
