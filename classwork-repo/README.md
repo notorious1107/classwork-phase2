@@ -2,18 +2,17 @@
 
 单班级数学作业网站，已实现[第一轮需求](docs/requirements-01.md)：教师创建学生账号、发布 10 道「20 以内加减」；学生登录、保存草稿、提交和查看自动批改；教师查看逐人成绩、已交/未交人数及平均分。学生仅能访问自己的答案与成绩，数据保存在本地 SQLite。
 
-[INC-001](../docs/开发记录/INC-001.md) 支持学生续做历史乘除法和混合运算作业，师生使用原账号查看原成绩。
+学生也能续做已有的乘除法和混合运算作业，师生可用原账号查看原成绩。
 
-开发遵循 [执行规则](AGENTS.md) 和 [小步提交规范](docs/commit-policy.md)。后续只按新发布的需求扩展。
+开发遵循 [执行规则](AGENTS.md) 和 [小步提交规范](docs/commit-policy.md)。
 
 ## 启动和停止
 
 需要 Node.js 22.13+（本机已用 22.17.0 验证）。运行服务无需安装第三方依赖，也无需配置数据库服务。
 
-在 PowerShell 中执行：
+在含有 `package.json` 的项目目录打开 PowerShell，运行以下命令。
 
 ```powershell
-cd C:/Users/29791/OneDrive/Desktop/classwork-phase2/classwork-repo
 npm start
 ```
 
