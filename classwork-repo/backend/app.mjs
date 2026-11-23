@@ -1,0 +1,194 @@
+import { createServer } from 'node:http';
+import { createHash, randomBytes } from 'node:crypto';
+import { openStore, hashPassword, verifyPassword, generateQuestions, solution } from './store.mjs';
+
+class HttpError extends Error {
+  constructor(status, message) { super(message); this.status = status; }
+}
+const fail = (status, message) => { throw new HttpError(status, message); };
+const safeUser = u => ({ id: u.id, username: u.username, name: u.name, role: u.role });
+const digest = token => createHash('sha256').update(token).digest('hex');
+const now = () => new Date().toISOString();
+const cookie = (value, age) => `classwork_session=${value}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${age}`;
+
+async function body(req) {
+  if (!req.headers['content-type']?.startsWith('application/json')) fail(415, '请使用 JSON 请求');
+  let data = '';
+  for await (const chunk of req) {
+    data += chunk;
+    if (Buffer.byteLength(data) > 16_384) fail(413, '请求内容过大');
+  }
+  try {
+    const parsed = JSON.parse(data);
+    if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') throw new Error();
+    return parsed;
+  } catch { fail(400, '请求内容不是有效 JSON'); }
+}
+function textField(value, label, min, max) {
+  if (typeof value !== 'string' || value.trim().length < min || value.trim().length > max) {
+    fail(400, `${label}需为 ${min}–${max} 个字符`);
+  }
+  return value.trim();
+}
+function validateAnswers(answers, complete) {
+  if (!Array.isArray(answers) || answers.length !== 10 ||
+      answers.some(a => a !== null && (!Number.isInteger(a) || a < 0 || a > 20))) {
+    fail(400, '请填写 0–20 的整数，每份作业共 10 题');
+  }
+  if (complete && answers.includes(null)) fail(400, '还有题目未作答，请完成全部 10 题再提交');
+  return answers;
+}
+
+export async function createApp({ dbPath = 'data/classwork.sqlite', teacherPassword, logger = console } = {}) {
+  const db = await openStore(dbPath, teacherPassword);
+  const attempts = new Map();
+  function requireRole(user, role) {
+    if (user.role !== role) fail(403, '当前账号无权执行此操作');
+  }
+  function assignment(id) {
+    const row = db.prepare('SELECT * FROM assignments WHERE id=?').get(id);
+    if (!row) fail(404, '作业不存在');
+    return { ...row, questions: JSON.parse(row.questions) };
+  }
+  function studentView(a, studentId) {
+    const s = db.prepare('SELECT * FROM submissions WHERE assignment_id=? AND student_id=?').get(a.id, studentId);
+    const result = { id: a.id, title: a.title, createdAt: a.created_at, questions: a.questions,
+      answers: s ? JSON.parse(s.answers) : Array(10).fill(null), savedAt: s?.saved_at ?? null,
+      submittedAt: s?.submitted_at ?? null, score: s?.score ?? null };
+    if (s?.submitted_at) result.results = a.questions.map((q, i) => ({
+      correctAnswer: solution(q), correct: result.answers[i] === solution(q)
+    }));
+    return result;
+  }
+  function report(a) {
+    const students = db.prepare(`SELECT u.id,u.username,u.name,s.submitted_at,s.saved_at,s.score
+      FROM users u LEFT JOIN submissions s ON s.student_id=u.id AND s.assignment_id=?
+      WHERE u.role='student' ORDER BY u.id`).all(a.id).map(s => ({
+        id: s.id, username: s.username, name: s.name,
+        submittedAt: s.submitted_at ?? null, savedAt: s.saved_at ?? null, score: s.score ?? null
+      }));
+    const submitted = students.filter(s => s.submittedAt);
+    return { id: a.id, title: a.title, createdAt: a.created_at, questions: a.questions,
+      students, total: students.length, submitted: submitted.length,
+      pending: students.length - submitted.length,
+      average: submitted.length ? Math.round(submitted.reduce((sum, s) => sum + s.score, 0) / submitted.length * 10) / 10 : null };
+  }
+  const server = createServer(async (req, res) => {
+    const send = (status, value, headers = {}) => {
+      res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8',
+        'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', ...headers });
+      res.end(JSON.stringify(value));
+    };
+    try {
+      const url = new URL(req.url, 'http://localhost');
+      const path = url.pathname;
+      if (!['GET', 'POST', 'PUT'].includes(req.method)) fail(405, '不支持此请求方法');
+      if (req.method !== 'GET' && req.headers.origin) {
+        let origin;
+        try { origin = new URL(req.headers.origin); } catch { fail(403, '请求来源无效'); }
+        if (origin.host !== req.headers.host || !['http:', 'https:'].includes(origin.protocol)) fail(403, '请求来源不受信任');
+      }
+      if (path === '/api/health' && req.method === 'GET') return send(200, { ok: true });
+      if (path === '/api/login' && req.method === 'POST') {
+        const input = await body(req);
+        const username = textField(input.username, '账号', 1, 32);
+        const password = textField(input.password, '密码', 1, 128);
+        const key = `${req.socket.remoteAddress}:${username}`;
+        const cutoff = Date.now();
+        for (const [k, value] of attempts) if (value.until <= cutoff) attempts.delete(k);
+        const entry = attempts.get(key) ?? { count: 0, until: cutoff + 60_000 };
+        if (entry.count >= 10) fail(429, '尝试次数过多，请 1 分钟后重试');
+        const u = db.prepare('SELECT * FROM users WHERE username=?').get(username);
+        // Use a real hash even for unknown users to avoid a fast username probe.
+        const fallback = db.prepare("SELECT password_hash FROM users WHERE role='teacher'").get().password_hash;
+        const valid = await verifyPassword(password, u?.password_hash ?? fallback);
+        if (!u || !valid) {
+          entry.count++; attempts.set(key, entry);
+          fail(401, '账号或密码不正确');
+        }
+        attempts.delete(key);
+        const token = randomBytes(32).toString('hex');
+        db.prepare('DELETE FROM sessions WHERE expires<=?').run(Date.now());
+        db.prepare('INSERT INTO sessions VALUES(?,?,?)').run(digest(token), u.id, Date.now() + 7 * 86400_000);
+        return send(200, safeUser(u), { 'Set-Cookie': cookie(token, 7 * 86400) });
+      }
+      const rawToken = req.headers.cookie?.split(';').map(v => v.trim()).find(v => v.startsWith('classwork_session='))?.slice(18);
+      const user = rawToken && db.prepare(`SELECT u.* FROM users u JOIN sessions s ON s.user_id=u.id
+        WHERE s.token_hash=? AND s.expires>?`).get(digest(rawToken), Date.now());
+      if (!user) fail(401, '请先登录');
+      if (path === '/api/me' && req.method === 'GET') return send(200, safeUser(user));
+      if (path === '/api/logout' && req.method === 'POST') {
+        db.prepare('DELETE FROM sessions WHERE token_hash=?').run(digest(rawToken));
+        return send(200, { ok: true }, { 'Set-Cookie': cookie('', 0) });
+      }
+      if (path === '/api/students') {
+        requireRole(user, 'teacher');
+        if (req.method === 'GET') return send(200, db.prepare("SELECT id,username,name FROM users WHERE role='student' ORDER BY id").all());
+        if (req.method === 'POST') {
+          const input = await body(req);
+          const username = textField(input.username, '账号', 3, 32);
+          if (!/^[a-zA-Z0-9_-]+$/.test(username)) fail(400, '账号仅支持字母、数字、下划线和短横线');
+          const name = textField(input.name, '姓名', 1, 30);
+          const password = textField(input.password, '密码', 8, 128);
+          const hash = await hashPassword(password);
+          try {
+            const result = db.prepare("INSERT INTO users(username,name,password_hash,role) VALUES(?,?,?,'student')").run(username, name, hash);
+            return send(201, { id: Number(result.lastInsertRowid), username, name });
+          } catch (e) {
+            if (String(e.message).includes('UNIQUE')) fail(409, '账号已存在，请更换账号');
+            throw e;
+          }
+        }
+      }
+      if (path === '/api/assignments') {
+        if (req.method === 'GET') {
+          const list = db.prepare('SELECT * FROM assignments ORDER BY id DESC').all().map(a => ({ ...a, questions: JSON.parse(a.questions) }));
+          return send(200, list.map(a => user.role === 'teacher' ? report(a) : studentView(a, user.id)));
+        }
+        if (req.method === 'POST') {
+          requireRole(user, 'teacher');
+          const input = await body(req);
+          const title = textField(input.title, '作业名称', 1, 60);
+          const questions = generateQuestions();
+          const result = db.prepare('INSERT INTO assignments(title,questions,created_at) VALUES(?,?,?)').run(title, JSON.stringify(questions), now());
+          return send(201, report(assignment(Number(result.lastInsertRowid))));
+        }
+      }
+      const match = path.match(/^\/api\/assignments\/([1-9]\d*)(?:\/(draft|submit|report))?$/);
+      if (match) {
+        const a = assignment(Number(match[1]));
+        const action = match[2];
+        if (action === 'report' && req.method === 'GET') {
+          requireRole(user, 'teacher'); return send(200, report(a));
+        }
+        if (!action && req.method === 'GET') {
+          return send(200, user.role === 'teacher' ? report(a) : studentView(a, user.id));
+        }
+        if ((action === 'draft' && req.method === 'PUT') || (action === 'submit' && req.method === 'POST')) {
+          requireRole(user, 'student');
+          const existing = studentView(a, user.id);
+          if (existing.submittedAt) {
+            if (action === 'submit') return send(200, existing);
+            fail(409, '作业已提交，不能再修改答案');
+          }
+          const input = await body(req);
+          const answers = validateAnswers(input.answers, action === 'submit');
+          const score = action === 'submit' ? a.questions.reduce((sum, q, i) => sum + (solution(q) === answers[i] ? 10 : 0), 0) : null;
+          const savedAt = now();
+          const written = db.prepare(`INSERT INTO submissions(assignment_id,student_id,answers,saved_at,submitted_at,score)
+            VALUES(?,?,?,?,?,?) ON CONFLICT(assignment_id,student_id) DO UPDATE SET
+            answers=excluded.answers,saved_at=excluded.saved_at,submitted_at=excluded.submitted_at,score=excluded.score
+            WHERE submissions.submitted_at IS NULL`)
+            .run(a.id, user.id, JSON.stringify(answers), savedAt, action === 'submit' ? savedAt : null, score);
+          if (!written.changes && action === 'draft') fail(409, '作业已提交，不能再修改答案');
+          return send(200, studentView(a, user.id));
+        }
+      }
+      fail(404, '接口不存在');
+    } catch (e) {
+      if (!e.status) logger.error(e);
+      send(e.status ?? 500, { error: e.status ? e.message : '服务暂时不可用，请稍后重试' });
+    }
+  });
+  return { server, db };
+}

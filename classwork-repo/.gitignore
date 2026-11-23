@@ -1,0 +1,23 @@
+# Local secrets
+.env
+.env.*
+!.env.example
+
+# Local output and data
+.runtime/
+.local-data/
+data/
+*.log
+test-results/
+
+# Dependencies and build output
+node_modules/
+target/
+dist/
+build/
+coverage/
+
+# Editor and OS files
+.idea/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#2457d6">
+  <title>小小算术 · 班级作业本</title>
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/app.mjs"></script>
+</head>
+<body>
+  <div id="app"><p class="loading">正在打开作业本…</p></div>
+  <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+  <dialog id="submit-dialog" aria-labelledby="dialog-title">
+    <div class="dialog-content">
+      <span class="eyebrow">检查完成了吗？</span>
+      <h2 id="dialog-title">交上这份作业</h2>
+      <p>提交后会立即批改，答案不能再修改。你可以先返回检查。</p>
+      <div class="actions"><button id="cancel-submit" class="button secondary">返回检查</button><button id="confirm-submit" class="button">确认提交</button></div>
+    </div>
+  </dialog>
+</body>
+</html>

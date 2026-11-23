@@ -1,0 +1,20 @@
+{
+  "name": "classwork-incremental",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "start": "node scripts/start.mjs",
+    "start:api": "node --experimental-sqlite backend/server.mjs",
+    "start:web": "node frontend/server.mjs",
+    "demo": "node --experimental-sqlite scripts/demo.mjs",
+    "test": "node --experimental-sqlite --test tests/*.test.mjs",
+    "check": "node scripts/check.mjs"
+  },
+  "devDependencies": {
+    "jsdom": "^29.1.1"
+  }
+}
