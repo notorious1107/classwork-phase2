@@ -38,12 +38,12 @@ function textField(value, label, min, max) {
   }
   return value.trim();
 }
-function validateAnswers(answers, complete, answerMax, questionCount, answerMaxes) {
+function validateAnswers(answers, complete, answerMax, questionCount, answerMaxes, allowIncomplete = false) {
   if (!Array.isArray(answers) || answers.length !== questionCount ||
       answers.some((a, i) => a !== null && (!Number.isInteger(a) || a < 0 || a > (answerMaxes?.[i] ?? answerMax)))) {
     fail(400, `请填写 0–${answerMax} 的整数，本份作业共 ${questionCount} 题`);
   }
-  if (complete && answers.includes(null)) fail(400, `还有题目未作答，请完成全部 ${questionCount} 题再提交`);
+  if (complete && answers.includes(null) && !allowIncomplete) fail(400, `还有 ${answers.filter(a => a === null).length} 题未作答，请返回补答，或确认按现有答案交卷`);
   return answers;
 }
 
@@ -126,14 +126,14 @@ export async function createApp({ dbPath = 'data/classwork.sqlite', teacherPassw
     const result = { ...a, startedAt: start?.started_at ?? null, effectiveDueAt,
       isClosed: effectiveDueAt !== null && clock() >= Date.parse(effectiveDueAt),
       answers: s ? JSON.parse(s.answers) : Array(a.questionCount).fill(null), savedAt: s?.saved_at ?? null,
-      submittedAt: s?.submitted_at ?? null, score: s?.score ?? null };
+      submittedAt: s?.submitted_at ?? null, score: s?.score ?? null, draftRevision: s?.draft_revision ?? 0 };
     if (a.timeLimitMinutes) result.serverNow = new Date(clock()).toISOString();
     if (a.timeLimitMinutes && !start && !s?.submitted_at) {
       result.questions = []; result.expressions = []; result.answers = [];
     }
     if (s?.submitted_at) result.results = a.questions.map((q, i) => {
       const correctAnswer = solution(q);
-      return { correctAnswer, correct: result.answers[i] === correctAnswer };
+      return { correctAnswer, correct: result.answers[i] === correctAnswer, missing: result.answers[i] == null || result.answers[i] === '' };
     });
     return result;
   }
@@ -160,7 +160,7 @@ export async function createApp({ dbPath = 'data/classwork.sqlite', teacherPassw
       savedAt: s?.saved_at ?? null, submittedAt: s?.submitted_at ?? null, score: s?.submitted_at ? s.score : null,
       answers, results: a.questions.map((q, i) => {
         const correctAnswer = solution(q);
-        return { correctAnswer, correct: s?.submitted_at ? answers[i] === correctAnswer : null };
+        return { correctAnswer, correct: s?.submitted_at ? answers[i] === correctAnswer : null, missing: s?.submitted_at ? answers[i] == null || answers[i] === '' : null };
       }) };
   }
   const server = createServer(async (req, res) => {
@@ -192,7 +192,7 @@ export async function createApp({ dbPath = 'data/classwork.sqlite', teacherPassw
         // Use a real hash even for unknown users to avoid a fast username probe.
         const fallback = db.prepare("SELECT password_hash FROM users WHERE role='teacher'").get().password_hash;
         const valid = await verifyPassword(password, u?.password_hash ?? fallback);
-        if (!u || !valid) {
+        if (!u || !valid || db.prepare('SELECT password_hash FROM users WHERE id=?').get(u.id)?.password_hash !== u.password_hash) {
           entry.count++; attempts.set(key, entry);
           fail(401, '账号或密码不正确');
         }
@@ -206,7 +206,33 @@ export async function createApp({ dbPath = 'data/classwork.sqlite', teacherPassw
       const user = rawToken && db.prepare(`SELECT u.* FROM users u JOIN sessions s ON s.user_id=u.id
         WHERE s.token_hash=? AND s.expires>?`).get(digest(rawToken), Date.now());
       if (!user) fail(401, '请先登录');
+      const recheckSession = () => {
+        if (!db.prepare('SELECT 1 FROM sessions WHERE token_hash=? AND user_id=? AND expires>?').get(digest(rawToken), user.id, Date.now())) fail(401, '登录已失效，请重新登录');
+      };
       if (path === '/api/me' && req.method === 'GET') return send(200, safeUser(user));
+      if (path === '/api/me/password' && req.method === 'PUT') {
+        requireRole(user, 'student');
+        const input = await body(req), currentPassword = textField(input.currentPassword, '原密码', 1, 128), password = textField(input.newPassword, '新密码', 8, 128);
+        if (!await verifyPassword(currentPassword, user.password_hash)) fail(400, '原密码不正确');
+        const hash = await hashPassword(password);
+        recheckSession();
+        const changed = db.prepare("UPDATE users SET password_hash=? WHERE id=? AND role='student' AND password_hash=?").run(hash, user.id, user.password_hash);
+        if (!changed.changes) fail(409, '密码已在其他窗口改变，请重新登录后重试');
+        db.prepare('DELETE FROM sessions WHERE user_id=? AND token_hash<>?').run(user.id, digest(rawToken));
+        return send(200, { ok: true });
+      }
+      const passwordMatch = path.match(/^\/api\/students\/([1-9]\d*)\/password$/);
+      if (passwordMatch && req.method === 'PUT') {
+        requireRole(user, 'teacher');
+        const input = await body(req), classId = validClassId(input.classId), pupil = student(Number(passwordMatch[1]));
+        if ((pupil.class_id ?? 1) !== classId) fail(404, '该学生不在当前班级');
+        const hash = await hashPassword(textField(input.newPassword, '新密码', 8, 128));
+        recheckSession();
+        const changed = db.prepare("UPDATE users SET password_hash=? WHERE id=? AND role='student' AND COALESCE(class_id,1)=?").run(hash, pupil.id, classId);
+        if (!changed.changes) fail(409, '学生已转班，请刷新当前名单后重试');
+        db.prepare('DELETE FROM sessions WHERE user_id=?').run(pupil.id);
+        return send(200, { ok: true, student: safeUser(pupil) });
+      }
       if (path === '/api/assignment-previews/current' && req.method === 'GET') { requireRole(user, 'teacher'); return send(200, { preview: readPreview(db, user.id) }); }
       if (path === '/api/assignment-previews' && req.method === 'POST') {
         requireRole(user, 'teacher'); const settings = assignmentSettings(await body(req));
@@ -389,7 +415,7 @@ export async function createApp({ dbPath = 'data/classwork.sqlite', teacherPassw
           return send(200, user.role === 'teacher' ? report(a, classFilter(url)) : studentView(a, user.id));
         }
         if (action === 'start' && req.method === 'POST') {
-          requireRole(user, 'student'); await body(req); requireAccess(a, currentStudent(user));
+          requireRole(user, 'student'); await body(req); recheckSession(); requireAccess(a, currentStudent(user));
           const view = studentView(a, user.id);
           if (view.startedAt || view.submittedAt) return send(200, view);
           if (isClosed(a)) fail(409, '作业已截止，不能开始作答');
@@ -405,6 +431,7 @@ export async function createApp({ dbPath = 'data/classwork.sqlite', teacherPassw
             fail(409, '作业已提交，不能再修改答案');
           }
           const input = await body(req);
+          recheckSession();
           requireAccess(a, currentStudent(user));
           // A request may wait for its body while another request submits this work.
           const latest = studentView(a, user.id);
@@ -413,7 +440,16 @@ export async function createApp({ dbPath = 'data/classwork.sqlite', teacherPassw
             fail(409, '作业已提交，不能再修改答案');
           }
           if (a.timeLimitMinutes && !latest.startedAt) fail(400, '请先点击开始作答');
-          const answers = validateAnswers(input.answers, action === 'submit', a.answerMax, a.questionCount, a.answerMaxes);
+          const answers = validateAnswers(input.answers, action === 'submit', a.answerMax, a.questionCount, a.answerMaxes, input.allowIncomplete === true);
+          if (input.draftRevision !== undefined && (!Number.isSafeInteger(input.draftRevision) || input.draftRevision < 0)) fail(400, '草稿版本无效，请重新打开作业');
+          const conflict = () => send(409, { error: '草稿已在其他窗口更新。已保留本页答案，请选择载入已保存草稿，或确认保留本页答案后再保存。', code: 'DRAFT_CONFLICT', draftRevision: studentView(a, user.id).draftRevision });
+          let revision = input.draftRevision ?? null;
+          if (revision !== null && revision !== latest.draftRevision) {
+            // A lost save response can safely be retried when the stored answers are identical.
+            if (JSON.stringify(answers) !== JSON.stringify(latest.answers)) return conflict();
+            if (action === 'draft') return send(200, latest);
+            revision = latest.draftRevision;
+          }
           const correct = a.questions.filter((q, i) => solution(q) === answers[i]).length;
           const score = action === 'submit' ? correct * 100 / a.questionCount : null;
           const stamp = clock();
@@ -421,12 +457,16 @@ export async function createApp({ dbPath = 'data/classwork.sqlite', teacherPassw
             fail(409, '作业已截止或个人时间已用完，不能再提交；仍可保存草稿，老师处计为未交');
           }
           const savedAt = new Date(stamp).toISOString();
-          const written = db.prepare(`INSERT INTO submissions(assignment_id,student_id,answers,saved_at,submitted_at,score)
-            VALUES(?,?,?,?,?,?) ON CONFLICT(assignment_id,student_id) DO UPDATE SET
-            answers=excluded.answers,saved_at=excluded.saved_at,submitted_at=excluded.submitted_at,score=excluded.score
-            WHERE submissions.submitted_at IS NULL`)
-            .run(a.id, user.id, JSON.stringify(answers), savedAt, action === 'submit' ? savedAt : null, score);
-          if (!written.changes && action === 'draft') fail(409, '作业已提交，不能再修改答案');
+          const written = db.prepare(`INSERT INTO submissions(assignment_id,student_id,answers,saved_at,submitted_at,score,draft_revision)
+            VALUES(?,?,?,?,?,?,1) ON CONFLICT(assignment_id,student_id) DO UPDATE SET
+            answers=excluded.answers,saved_at=excluded.saved_at,submitted_at=excluded.submitted_at,score=excluded.score,draft_revision=COALESCE(submissions.draft_revision,0)+1
+            WHERE submissions.submitted_at IS NULL AND (? IS NULL OR COALESCE(submissions.draft_revision,0)=?)`)
+            .run(a.id, user.id, JSON.stringify(answers), savedAt, action === 'submit' ? savedAt : null, score, revision, revision);
+          if (!written.changes) {
+            const current = studentView(a, user.id);
+            if (!current.submittedAt) return conflict();
+            if (action === 'draft') fail(409, '作业已提交，不能再修改答案');
+          }
           return send(200, studentView(a, user.id));
         }
       }

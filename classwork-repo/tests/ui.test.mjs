@@ -11,6 +11,7 @@ import { createHistoryClass, historyAssignments, studentPassword, teacherPasswor
 import { seedCorrections } from './correction-fixture.mjs';
 import { legacyPreviewClass, legacyPreviewSchemas } from './preview-fixture.mjs';
 import { seedAnalytics } from './analytics-fixture.mjs';
+import { createRevisionClass } from './learning-fixture.mjs';
 
 const html = await readFile(new URL('../frontend/index.html', import.meta.url), 'utf8');
 const source = await readFile(new URL('../frontend/app.mjs', import.meta.url), 'utf8');
@@ -137,10 +138,10 @@ test('页面表单经独立前端代理完成师生全流程（DOM 环境，无�
       await waitFor(() => other.d.querySelector('#answer-form'), '另一学生打开作业');
       assert.equal(other.d.querySelector('#answer-0').value, '');
     });
-    await t.test('未完成拦截、确认提交、逐题反馈及教师统计刷新', async () => {
+    await t.test('未完成提示可返回补答、确认提交、逐题反馈及教师统计刷新', async () => {
       student.submit('answer-form'); assert.equal(student.d.querySelector('dialog').open, true);
-      student.click('#confirm-submit');
-      await waitFor(() => student.d.querySelector('#answer-error').textContent.includes('未作答'), '未完成拦截');
+      assert.ok(student.d.querySelector('#submit-missing').textContent.includes('9 题没答'));
+      student.click('#cancel-submit'); assert.equal(student.d.querySelector('dialog').open, false);
       const questions = JSON.parse(app.db.prepare('SELECT questions FROM assignments WHERE id=?').get(id).questions);
       questions.forEach((q, i) => student.fill(`answer-${i}`, i === 0 ? (solution(q) + 1) % 21 : solution(q)));
       student.submit('answer-form'); student.click('#cancel-submit');
@@ -466,10 +467,10 @@ function seedRecords(app) {
   db.prepare('UPDATE assignments SET questions=?,category=? WHERE id=?').run(JSON.stringify(original.questions), original.category, ids.shared);
   db.prepare('UPDATE submissions SET answers=?,score=80 WHERE assignment_id=? AND student_id=?').run(JSON.stringify(wrong), ids.shared, pupil('lin'));
   db.prepare('UPDATE submissions SET answers=? WHERE assignment_id=? AND student_id=?').run(JSON.stringify(original.key), ids.shared, pupil('zhou'));
-  db.prepare('INSERT INTO submissions VALUES(?,?,?,?,?,?)').run(ids.shared, pupil('pending'), JSON.stringify([0, null, 16, ...Array(7).fill(null)]), '2026-11-24T04:00:00Z', null, null);
+  db.prepare('INSERT INTO submissions(assignment_id,student_id,answers,saved_at,submitted_at,score) VALUES(?,?,?,?,?,?)').run(ids.shared, pupil('pending'), JSON.stringify([0, null, 16, ...Array(7).fill(null)]), '2026-11-24T04:00:00Z', null, null);
   const mixed = publishAssignment(db, '上周先乘除后加减', { category: 'mixed-100', questionCount: 50, grade: 3, knowledgePoints: ['precedence'] });
   db.prepare('UPDATE assignments SET created_at=? WHERE id=?').run('2026-11-17T01:00:00Z', mixed);
-  db.prepare('INSERT INTO submissions VALUES(?,?,?,?,?,?)').run(mixed, pupil('lin'), JSON.stringify([0, ...Array(49).fill(null)]), '2026-11-18T01:00:00Z', null, null);
+  db.prepare('INSERT INTO submissions(assignment_id,student_id,answers,saved_at,submitted_at,score) VALUES(?,?,?,?,?,?)').run(mixed, pupil('lin'), JSON.stringify([0, ...Array(49).fill(null)]), '2026-11-18T01:00:00Z', null, null);
   db.prepare("INSERT INTO users(username,name,password_hash,role,class_id) SELECT 'blank','小林',password_hash,'student',1 FROM users WHERE role='teacher'").run();
   db.prepare("INSERT INTO classes(name) VALUES('空班')").run();
   return { ...ids, mixed, lin: pupil('lin'), pendingStudent: pupil('pending'), zhou: pupil('zhou'), blank: pupil('blank') };
@@ -749,7 +750,7 @@ test('学情无人提交与零分展示、断网重试、无效题号和延迟�
     assert.equal(teacher.d.querySelector('.analytics-summary>div:last-child strong').textContent,'暂无均分');
     teacher.click('[name="analyticsAll"]');assert.equal(teacher.d.querySelectorAll('.analytics-question').length,10);
     assert.ok(teacher.d.querySelector('.analytics-counts>div:last-child').textContent.includes('4 人'));
-    app.db.prepare('INSERT INTO submissions VALUES(?,?,?,?,?,?)').run(pending,ids.lin,JSON.stringify(Array(10).fill(0)),'2026-12-02T00:00:00Z','2026-12-02T00:00:00Z',0);
+    app.db.prepare('INSERT INTO submissions(assignment_id,student_id,answers,saved_at,submitted_at,score) VALUES(?,?,?,?,?,?)').run(pending,ids.lin,JSON.stringify(Array(10).fill(0)),'2026-12-02T00:00:00Z','2026-12-02T00:00:00Z',0);
     teacher.click('[data-action="refresh"]');await waitFor(()=>teacher.d.querySelector('.analytics-summary>div:last-child strong')?.textContent==='0','实际均分零');
     teacher.session.failPath='/analytics?';teacher.click('[data-action="refresh"]');await waitFor(()=>teacher.d.querySelector('.empty h2')?.textContent.includes('暂时没有打开'),'断网');
     assert.equal(teacher.d.querySelector('.analytics-summary'),null);
@@ -768,6 +769,87 @@ test('学情无人提交与零分展示、断网重试、无效题号和延迟�
     await waitFor(()=>teacher.d.querySelector('.analytics-heading h2')?.textContent.startsWith('二班'),'新班先完成');release();await completed;await new Promise(r=>setImmediate(r));
     assert.equal(teacher.d.querySelector('[name="currentClass"]').value,'2');
     assert.equal(teacher.d.querySelector('.analytics-summary>div:last-child strong').textContent,'40');
+  });
+});
+
+test('停笔自动保存零答案，保存中继续输入不丢失，旧版草稿版本接续并刷新恢复',async()=>{
+  await withPages(async({app,page,login})=>{
+    let pupil=await page();await login(pupil,'pupil4',studentPassword);pupil.click('a[href="#/assignment/33"]');await waitFor(()=>pupil.d.querySelector('#answer-form'),'打开旧草稿');
+    assert.equal(pupil.d.querySelector('#answer-1').value,'13');assert.equal(app.db.prepare('SELECT draft_revision FROM submissions WHERE assignment_id=33 AND student_id=4').get().draft_revision,17);
+    let release,received;const gate=new Promise(r=>{release=r;}),started=new Promise(r=>{received=r;});const original=pupil.w.fetch;
+    pupil.w.fetch=async(path,options)=>{const response=await original(path,options);if(!String(path).endsWith('/draft'))return response;received();await gate;return response;};
+    pupil.fill('answer-2',0);pupil.d.querySelector('#answer-2').focus();await started;
+    assert.ok(pupil.d.querySelector('#save-state').textContent.includes('正在保存'));assert.equal(pupil.d.querySelector('#answer-2').disabled,false);
+    const input=pupil.d.querySelector('#answer-3');pupil.fill('answer-3',9);input.focus();release();
+    await waitFor(()=>pupil.d.querySelector('#save-state').textContent.startsWith('已保存')&&app.db.prepare('SELECT draft_revision FROM submissions WHERE assignment_id=33 AND student_id=4').get().draft_revision===19,'后续输入再次自动保存');
+    assert.equal(pupil.d.activeElement,input);assert.equal(input.value,'9');assert.equal(pupil.d.querySelector('#answer-2').value,'0');
+    const session=pupil.session;pupil.w.close();pupil=await page(session,'#/assignment/33');assert.equal(pupil.d.querySelector('#answer-2').value,'0');assert.equal(pupil.d.querySelector('#answer-3').value,'9');
+    const teacher=await page();await login(teacher,'teacher',teacherPassword);teacher.w.location.hash='#/assignment/33?classId=1';await waitFor(()=>teacher.d.querySelector('.report-stats'),'草稿仍未交');assert.ok(teacher.d.querySelector('.report-stats').textContent.includes('未交'));
+  },createRevisionClass);
+});
+
+test('自动草稿断网和响应丢失保留输入可重试，到截止后仍自动保存且保持未交',async()=>{
+  await withPages(async({app,page,login})=>{
+    const ids=seedAnalytics(app.db), id=publishAssignment(app.db,'逾期仍自动保存',{dueAt:'2020-01-01T00:00:00Z'}),pupil=await page();await login(pupil,'lin','Teacher123!');
+    pupil.click(`a[href="#/assignment/${id}"]`);await waitFor(()=>pupil.d.querySelector('#answer-form'),'打开逾期作业');assert.equal(pupil.d.querySelector('[data-submit]').disabled,true);
+    pupil.session.failPath='/draft';pupil.fill('answer-2',0);await waitFor(()=>pupil.d.querySelector('#save-state').textContent.includes('保存失败'),'自动保存失败');assert.equal(pupil.d.querySelector('#answer-2').value,'0');
+    pupil.session.failPath='';const original=pupil.w.fetch;let lose=true;
+    pupil.w.fetch=async(path,options)=>{const response=await original(path,options);if(lose&&String(path).endsWith('/draft')){lose=false;throw new Error('响应丢失');}return response;};
+    pupil.w.dispatchEvent(new pupil.w.Event('online'));await waitFor(()=>app.db.prepare('SELECT draft_revision FROM submissions WHERE assignment_id=? AND student_id=?').get(id,ids.ids.lin)?.draft_revision===1,'服务器已保存但响应丢失');
+    await waitFor(()=>pupil.d.querySelector('#save-state').textContent.includes('保存失败'),'回包丢失提示');pupil.click('[data-action="save"]');
+    await waitFor(()=>pupil.d.querySelector('#save-state').textContent.startsWith('已保存'),'同版本重试');
+    const stored=app.db.prepare('SELECT * FROM submissions WHERE assignment_id=? AND student_id=?').get(id,ids.ids.lin);assert.equal(stored.draft_revision,1);assert.equal(stored.submitted_at,null);assert.equal(stored.score,null);assert.equal(JSON.parse(stored.answers)[2],0);
+    const refreshed=await page(pupil.session,`#/assignment/${id}`);assert.equal(refreshed.d.querySelector('#answer-2').value,'0');assert.equal(refreshed.d.querySelector('[data-submit]').disabled,true);
+  });
+});
+
+test('两个窗口的自动草稿冲突暂停保存，保留本页答案或载入新草稿须明确选择',async()=>{
+  await withPages(async({app,page,login})=>{
+    const ids=seedAnalytics(app.db),id=publishAssignment(app.db,'两窗口草稿'),first=await page();await login(first,'lin','Teacher123!');first.click(`a[href="#/assignment/${id}"]`);await waitFor(()=>first.d.querySelector('#answer-form'),'第一窗口');
+    const second=await page(first.session,`#/assignment/${id}`);first.fill('answer-0',0);await waitFor(()=>first.d.querySelector('#save-state').textContent.startsWith('已保存'),'先保存');
+    second.fill('answer-0',9);await waitFor(()=>second.d.querySelector('#draft-conflict')&&!second.d.querySelector('#draft-conflict').hidden,'旧窗口冲突');
+    assert.equal(second.d.querySelector('#answer-0').value,'9');assert.ok(second.d.querySelector('#save-state').textContent.includes('已暂停'));assert.equal(second.d.querySelector('[data-submit]').disabled,false);
+    const stored=()=>app.db.prepare('SELECT * FROM submissions WHERE assignment_id=? AND student_id=?').get(id,ids.ids.lin);
+    assert.equal(JSON.parse(stored().answers)[0],0);second.w.confirm=()=>false;second.click('[data-action="keep-local-draft"]');assert.equal(stored().draft_revision,1);
+    second.w.confirm=()=>true;second.click('[data-action="keep-local-draft"]');await waitFor(()=>second.d.querySelector('#save-state').textContent.startsWith('已保存'),'明确保留本页答案');assert.equal(stored().draft_revision,2);assert.equal(JSON.parse(stored().answers)[0],9);
+    first.fill('answer-1',8);await waitFor(()=>!first.d.querySelector('#draft-conflict').hidden,'第一窗口变为旧版本');first.click('[data-action="load-saved-draft"]');await waitFor(()=>first.d.querySelector('#answer-0')?.value==='9','载入较新草稿');assert.equal(first.d.querySelector('#answer-1').value,'');
+  });
+});
+
+test('漏题确认可返回补答，自动保存期间交卷顺序正确，80分原卷与错题本明确标注漏答',async()=>{
+  await withPages(async({app,page,login})=>{
+    const ids=seedAnalytics(app.db),id=publishAssignment(app.db,'先交会做的题'),questions=JSON.parse(app.db.prepare('SELECT questions FROM assignments WHERE id=?').get(id).questions),pupil=await page();await login(pupil,'lin','Teacher123!');
+    pupil.click(`a[href="#/assignment/${id}"]`);await waitFor(()=>pupil.d.querySelector('#answer-form'),'打开练习');questions.slice(0,8).forEach((q,i)=>pupil.fill(`answer-${i}`,solution(q)));
+    pupil.submit('answer-form');assert.ok(pupil.d.querySelector('#submit-missing').textContent.includes('2 题没答'));assert.equal(pupil.d.querySelector('#confirm-submit').textContent,'确认按现有答案交卷');pupil.click('#cancel-submit');assert.equal(pupil.d.querySelector('dialog').open,false);assert.equal(pupil.d.querySelector('.score-stamp'),null);
+    let release,received;const gate=new Promise(r=>{release=r;}),started=new Promise(r=>{received=r;});const original=pupil.w.fetch;
+    pupil.w.fetch=async(path,options)=>{const response=await original(path,options);if(!String(path).endsWith('/draft'))return response;received();await gate;return response;};
+    await started;pupil.submit('answer-form');pupil.click('#confirm-submit');assert.equal(pupil.d.querySelector('#answer-form fieldset').disabled,true);release();
+    await waitFor(()=>pupil.d.querySelector('.score-stamp strong')?.textContent==='80','80分交卷');assert.equal([...pupil.d.querySelectorAll('.question-feedback')].filter(n=>n.textContent.includes('漏答')).length,2);
+    const submitted=app.db.prepare('SELECT * FROM submissions WHERE assignment_id=? AND student_id=?').get(id,ids.ids.lin);assert.equal(submitted.draft_revision,2);assert.equal(JSON.parse(submitted.answers).filter(a=>a===null).length,2);
+    pupil.click('nav a[href="#/mistakes"]');await waitFor(()=>pupil.d.querySelector(`[data-mistake="${id}:9"]`),'漏答进入错题本');assert.ok(pupil.d.querySelector(`[data-mistake="${id}:9"]`).textContent.includes('漏答（未填）'));
+    pupil.click(`[data-mistake="${id}:9"] .mistake-origin`);await waitFor(()=>pupil.d.querySelector('.source-question'),'漏答回原卷');assert.ok(pupil.d.querySelector('.source-question').textContent.includes('漏答'));
+    const teacher=await page();await login(teacher,'teacher','Teacher123!');teacher.w.location.hash=`#/assignment/${id}/student/${ids.ids.lin}?classId=1`;await waitFor(()=>teacher.d.querySelector('.review-summary'),'教师原卷');assert.equal(teacher.d.querySelector('[data-review-question="8"] .review-verdict').textContent,'漏答');
+    teacher.w.location.hash=`#/analytics?classId=1&from=&to=&assignmentId=${id}&questionNumber=9`;await waitFor(()=>teacher.d.querySelector('#analytics-detail'),'漏答统计');assert.equal(teacher.d.querySelector('#analytics-detail .analytics-counts>div:nth-child(3) dd').textContent,'1 人');assert.equal(teacher.d.querySelector(`[data-analytics-student="${ids.ids.lin}"] .analytics-status`).textContent,'漏答');
+  });
+});
+
+test('学生自行改密与教师按学号重设同名学生，提示、权限、重新登录和草稿保留', async () => {
+  await withPages(async ({ app, page, login }) => {
+    const ids = seedAnalytics(app.db), pupil = await page(); await login(pupil,'lin','Teacher123!');
+    pupil.click('nav a[href="#/password"]');await waitFor(()=>pupil.d.querySelector('#password-form'),'学生改密');
+    pupil.fill('currentPassword','wrong');pupil.fill('newPassword','MyStudent123!');pupil.fill('confirmPassword','Mismatch123!');pupil.submit('password-form');
+    await waitFor(()=>pupil.d.querySelector('#password-error').textContent.includes('不一致'),'重复密码校验');
+    pupil.fill('confirmPassword','MyStudent123!');pupil.submit('password-form');await waitFor(()=>pupil.d.querySelector('#password-error').textContent.includes('原密码不正确'),'原密码校验');
+    pupil.fill('currentPassword','Teacher123!');pupil.submit('password-form');await waitFor(()=>pupil.d.querySelector('#password-success').textContent.includes('密码已修改'),'改密成功');
+    assert.equal(pupil.d.querySelector('[name="newPassword"]').value,'');
+    pupil.click('[data-action="logout"]');await waitFor(()=>pupil.d.querySelector('#login-form'),'退出');await login(pupil,'lin','MyStudent123!');
+    const teacher=await page();await login(teacher,'teacher','Teacher123!');teacher.click('nav a[href="#/students"]');await waitFor(()=>teacher.d.querySelector('#student-form'),'教师名单');
+    teacher.fill('studentSearch','draft');teacher.click('.reset-password-link');await waitFor(()=>teacher.d.querySelector('#password-form'),'指定学号重设');
+    assert.ok(teacher.d.querySelector('.password-target').textContent.includes('张宁'));assert.ok(teacher.d.querySelector('.password-target').textContent.includes('draft'));
+    teacher.fill('newPassword','ResetStudent123!');teacher.fill('confirmPassword','ResetStudent123!');teacher.submit('password-form');await waitFor(()=>teacher.d.querySelector('#password-success').textContent.includes('draft'),'重设反馈');
+    const selected=await page();await login(selected,'draft','ResetStudent123!');selected.click(`a[href="#/assignment/${ids.a}"]`);await waitFor(()=>selected.d.querySelector('#answer-form'),'原草稿可续做');assert.equal(selected.d.querySelector('#answer-0').value,'0');
+    const sameName=await page();await login(sameName,'nan','Teacher123!');
+    teacher.w.location.hash=`#/students/${ids.ids.zhou}/password?classId=1`;await waitFor(()=>teacher.d.querySelector('.empty p')?.textContent.includes('不在当前班级'),'跨班拦截');
   });
 });
 

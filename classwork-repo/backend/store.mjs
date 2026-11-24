@@ -120,6 +120,9 @@ export async function openStore(path, teacherPassword = 'Teacher123!') {
       PRIMARY KEY(assignment_id, student_id)
     );
   `);
+  if (!db.prepare("SELECT 1 FROM pragma_table_info('submissions') WHERE name='draft_revision'").get()) {
+    db.exec('ALTER TABLE submissions ADD COLUMN draft_revision INTEGER NOT NULL DEFAULT 0');
+  }
   if (!db.prepare("SELECT 1 FROM pragma_table_info('assignments') WHERE name='category'").get()) {
     db.exec('ALTER TABLE assignments ADD COLUMN category TEXT');
   }

@@ -70,7 +70,7 @@ export function mistakeBook(db, studentId) {
     questions.forEach((q, i) => {
       if (answers[i] === solution(q)) return;
       items.push({ assignmentId: row.id, questionNumber: i + 1, title: row.title, createdAt: row.created_at, submittedAt: row.submitted_at,
-        expression: formatExpression(q), originalAnswer: answers[i] ?? null,
+        expression: formatExpression(q), originalAnswer: answers[i] ?? null, originalStatus: answers[i] == null || answers[i] === '' ? 'missing' : 'wrong',
         ...(progress.get(`${row.id}:${i + 1}`) ?? { attemptCount: 0, firstCorrectAttempt: null, lastAttemptCorrect: null }) });
     });
   }

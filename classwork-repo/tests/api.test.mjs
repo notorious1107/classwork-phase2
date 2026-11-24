@@ -383,7 +383,7 @@ test('INC-001 已有班级在合成迁移库副本上继续使用', async t => {
           const view = (await request(path, { cookie })).body;
           assert.deepEqual(view.answers, JSON.parse(row.answers));
           assert.equal(view.savedAt, row.saved_at); assert.equal(view.submittedAt, row.submitted_at);
-          assert.deepEqual(view.results, a.key.map((correctAnswer, j) => ({ correctAnswer, correct: correctAnswer === view.answers[j] })));
+          assert.deepEqual(view.results, a.key.map((correctAnswer, j) => ({ correctAnswer, correct: correctAnswer === view.answers[j], missing: false })));
           assert.equal(view.results.filter(r => r.correct).length * 10, row.score);
           assert.equal(view.score, row.score); assert.equal(report.students[i].score, row.score);
           const retry = await request(path + '/submit', { method: 'POST', cookie, data: { answers: a.key } });
@@ -413,7 +413,7 @@ test('INC-001 已有班级在合成迁移库副本上继续使用', async t => {
       const answers = [...historyAssignments[2].key]; answers[1] = 17;
       const marked = await submit(answers);
       assert.equal(marked.status, 200); assert.equal(marked.body.score, 90);
-      assert.deepEqual(marked.body.results[1], { correct: false, correctAnswer: 13 });
+      assert.deepEqual(marked.body.results[1], { correct: false, correctAnswer: 13, missing: false });
       assert.equal((await put(partial)).status, 409);
       const report = (await request(path + '/report', { cookie: teacher })).body;
       assert.deepEqual(report.students.map(s => s.score), [80, 70, 90]);

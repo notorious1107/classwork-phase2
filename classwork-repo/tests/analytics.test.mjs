@@ -69,7 +69,7 @@ test('学情按北京时间发布日期包含起止日，默认最近七日；�
     assert.deepEqual(empty.summary,{assignmentCount:0,total:0,submitted:0,pending:0,average:null});assert.deepEqual(empty.questions,[]);
     const pending=publishAssignment(db,'无人提交',{classIds:[1]}); db.prepare('UPDATE assignments SET created_at=? WHERE id=?').run('2026-12-01T00:00:00Z',pending);
     assert.equal((await request('/analytics?classId=1&from=2026-12-01',teacher)).body.summary.average,null);
-    db.prepare('INSERT INTO submissions VALUES(?,?,?,?,?,?)').run(pending,ids.lin,JSON.stringify(Array(10).fill(0)),'2026-12-02T00:00:00Z','2026-12-02T00:00:00Z',0);
+    db.prepare('INSERT INTO submissions(assignment_id,student_id,answers,saved_at,submitted_at,score) VALUES(?,?,?,?,?,?)').run(pending,ids.lin,JSON.stringify(Array(10).fill(0)),'2026-12-02T00:00:00Z','2026-12-02T00:00:00Z',0);
     assert.equal((await request('/analytics?classId=1&from=2026-12-01',teacher)).body.summary.average,0);
     assert.equal((await request('/analytics?classId=1&from=&to=',teacher)).body.summary.assignmentCount,5);
     for(const query of ['classId=999','classId=','from=2026-02-30','from=0000-01-01','to=bad','from=2026-11-20&to=2026-11-19','assignmentId=1','questionNumber=1','assignmentId=1&questionNumber=0','assignmentId=1&questionNumber=9007199254740992']){

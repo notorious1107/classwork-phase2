@@ -17,7 +17,7 @@ export function seedCorrections(db) {
   const shared = make('括号与运算顺序 <b>', correctionQuestions, '2026-11-17T01:00:00Z');
   const second = make('另一份同题练习', correctionQuestions, '2026-11-23T16:00:00Z');
   const fifty = make('五十题练习', Array.from({ length: 50 }, (_, i) => correctionQuestions[i % 10]), '2026-11-16T01:00:00Z');
-  const insert = db.prepare('INSERT INTO submissions VALUES(?,?,?,?,?,?)');
+  const insert = db.prepare('INSERT INTO submissions(assignment_id,student_id,answers,saved_at,submitted_at,score) VALUES(?,?,?,?,?,?)');
   const firstAnswers = correctionKeys.map((v, i) => [0, 1, 2, 4].includes(i) ? v - 1 : v);
   insert.run(shared, students.learner, JSON.stringify(firstAnswers), '2026-11-18T04:00:00Z', '2026-11-18T04:00:00Z', 60);
   insert.run(shared, students.other, JSON.stringify(correctionKeys.map((v, i) => i === 1 ? 5 : v)), '2026-11-18T05:00:00Z', '2026-11-18T05:00:00Z', 90);

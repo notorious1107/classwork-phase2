@@ -34,7 +34,7 @@ test('教师按成绩名单读取原卷、已交逐题对错和未评分草稿�
     const original = historyAssignments[1], answers = [...original.key]; answers[0]++; answers[1]++;
     db.prepare('UPDATE assignments SET questions=?,category=?,due_at=? WHERE id=?').run(JSON.stringify(original.questions), original.category, '2020-01-01T00:00:00Z', id);
     const savedAt = '2026-11-17T04:00:00Z';
-    const write = db.prepare('INSERT INTO submissions VALUES(?,?,?,?,?,?)');
+    const write = db.prepare('INSERT INTO submissions(assignment_id,student_id,answers,saved_at,submitted_at,score) VALUES(?,?,?,?,?,?)');
     write.run(id, idOf('lin'), JSON.stringify(answers), savedAt, savedAt, 80);
     const draft = [0, null, 16, ...Array(7).fill(null)]; write.run(id, idOf('draft'), JSON.stringify(draft), savedAt, null, null);
     write.run(id, idOf('zhou'), JSON.stringify(original.key), savedAt, savedAt, 100);
@@ -96,7 +96,7 @@ test('学生记录以北京时间发布日期筛选日期及知识点，兼容�
     const mixed = publish('先乘除后加减提高', '2026-11-18T08:00:00Z', 'mixed-100', { questionCount: 50, grade: 3, difficulty: 'advanced', knowledgePoints: ['precedence'] });
     publish('小括号', '2026-11-18T08:00:00Z', 'mixed-100', { knowledgePoints: ['parentheses'] });
     publishAssignment(db, '只属于原班的新作业', { classIds: [1] });
-    const answer50 = [0, ...Array(49).fill(null)]; db.prepare('INSERT INTO submissions VALUES(?,?,?,?,?,?)').run(mixed, 2, JSON.stringify(answer50), '2026-11-19T04:00:00Z', null, null);
+    const answer50 = [0, ...Array(49).fill(null)]; db.prepare('INSERT INTO submissions(assignment_id,student_id,answers,saved_at,submitted_at,score) VALUES(?,?,?,?,?,?)').run(mixed, 2, JSON.stringify(answer50), '2026-11-19T04:00:00Z', null, null);
     const unchanged = snapshot(db);
     const base = '/students/2/history?classId=2';
     const week = await request(base + '&from=2026-11-16&to=2026-11-22&topic=mul-div-20', teacher);

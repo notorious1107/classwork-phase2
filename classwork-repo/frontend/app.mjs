@@ -4,7 +4,9 @@ const dialog = document.querySelector('#submit-dialog');
 const state = { user: null, assignments: [], students: [], classes: [], classId: null, importResult: null, studentQuery: '', calendarData: null, calendarDay: '', calendarBack: null, historyData: null, reviewData: null, mistakes: null, correction: null, mistakeHistories: {}, practiceOptions: null, assignment: null, dirty: false, busy: false, route: '', loading: false, loadError: '' };
 let loadEpoch = 0;
 let toastTimer;
-state.analyticsData = null; state.analyticsAll = false;
+let autosaveTimer, draftFlight = null, draftConflict = null, draftRetryDelay = 1000;
+function resetDraftSaving() { clearTimeout(autosaveTimer); draftFlight = null; draftConflict = null; draftRetryDelay = 1000; }
+state.analyticsData = null; state.analyticsAll = false; state.passwordStudent = null;
 state.preview = null; state.publishDraft = null; state.previewFingerprint = ''; state.previewStale = false;
 function resetPublish() { state.preview = null; state.publishDraft = null; state.previewFingerprint = ''; state.previewStale = false; }
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -44,9 +46,9 @@ async function api(path, method = 'GET', data) {
   for (const a of Array.isArray(result) ? result : [result]) if (a.serverNow) a.receivedAt = performance.now();
   if (!response.ok) {
     if (response.status === 401 && state.user) {
-      loadEpoch++; resetPublish(); state.user = null; state.dirty = false; state.assignment = null; state.assignments = []; state.students = []; state.importResult = null; state.studentQuery = ''; state.analyticsData = null; state.calendarData = null; state.calendarBack = null; state.historyData = null; state.reviewData = null; state.mistakes = null; state.correction = null; state.mistakeHistories = {}; render();
+      loadEpoch++; resetDraftSaving(); resetPublish(); state.user = null; state.dirty = false; state.assignment = null; state.assignments = []; state.students = []; state.importResult = null; state.studentQuery = ''; state.passwordStudent = null; state.analyticsData = null; state.calendarData = null; state.calendarBack = null; state.historyData = null; state.reviewData = null; state.mistakes = null; state.correction = null; state.mistakeHistories = {}; render();
     }
-    throw Object.assign(new Error(result.error || '操作失败，请重试'), { status: response.status });
+    throw Object.assign(new Error(result.error || '操作失败，请重试'), { status: response.status, code: result.code, draftRevision: result.draftRevision });
   }
   return result;
 }
@@ -58,9 +60,14 @@ function header() {
   const inCalendar = routePath() === '#/calendar' || !!state.calendarBack;
   const inStudents = routePath().startsWith('#/students') || (state.reviewData && new URLSearchParams(location.hash.split('?')[1]).has('historyClassId'));
   const inMistakes = routePath().startsWith('#/mistakes');
+  const inPassword = routePath() === '#/password';
   return `<header class="header"><a href="#/" class="brand"><span class="brand-mark">＋</span><span>小小算术<small>班级作业本</small></span></a>
-    ${state.user ? `<nav aria-label="主导航"><a href="#/" ${!inStudents && !inCalendar && !inMistakes && !inAnalytics ? 'aria-current="page"' : ''}>${state.user.role === 'teacher' ? '作业与成绩' : '我的作业'}</a>${state.user.role === 'teacher' ? `<a href="#/calendar" ${inCalendar ? 'aria-current="page"' : ''}>练习月历</a><a href="#/analytics" ${inAnalytics ? 'aria-current="page"' : ''}>班级学情</a><a href="#/students" ${inStudents ? 'aria-current="page"' : ''}>学生名单</a>` : `<a href="#/mistakes" ${inMistakes ? 'aria-current="page"' : ''}>我的错题本</a>`}</nav>
+    ${state.user ? `<nav aria-label="主导航"><a href="#/" ${!inStudents && !inCalendar && !inMistakes && !inAnalytics && !inPassword ? 'aria-current="page"' : ''}>${state.user.role === 'teacher' ? '作业与成绩' : '我的作业'}</a>${state.user.role === 'teacher' ? `<a href="#/calendar" ${inCalendar ? 'aria-current="page"' : ''}>练习月历</a><a href="#/analytics" ${inAnalytics ? 'aria-current="page"' : ''}>班级学情</a><a href="#/students" ${inStudents ? 'aria-current="page"' : ''}>学生名单</a>` : `<a href="#/mistakes" ${inMistakes ? 'aria-current="page"' : ''}>我的错题本</a><a href="#/password" ${inPassword ? 'aria-current="page"' : ''}>修改密码</a>`}</nav>
     <div class="user"><span>${esc(state.user.name)}<small>${state.user.role === 'teacher' ? '教师' : '学生'} · ${esc(state.user.username)}</small></span><button class="text-button" data-action="logout">退出</button></div>` : '<span class="header-note">每天练一练，一点点进步。</span>'}</header>`;
+}
+function passwordView() {
+  const pupil = state.passwordStudent, reset = !!pupil, target = pupil ?? state.user;
+  return `<a class="back-link" href="${reset ? `#/students?classId=${state.classId}` : '#/'}">← 返回${reset ? '本班名单' : '我的作业'}</a>${pageTitle('账号管理', reset ? '重设学生密码' : '修改我的密码', reset ? '请按学号核对学生，再填写新密码。' : '填写原密码，将初始密码换成自己记得住的新密码。')}<section class="panel password-panel"><div class="password-target"><strong>${esc(target.name)}</strong><p>学号 / 账号：<b>${esc(target.username)}</b>${reset ? `<br>班级：${esc(state.classes.find(c => c.id === state.classId)?.name)}` : ''}</p></div><form id="password-form">${reset ? '' : '<label>原密码<input type="password" name="currentPassword" autocomplete="current-password" required maxlength="128"></label>'}<label>新密码<input type="password" name="newPassword" autocomplete="new-password" minlength="8" maxlength="128" required><small>8–128 个字符，请自行记录。</small></label><label>再输入一次新密码<input type="password" name="confirmPassword" autocomplete="new-password" minlength="8" maxlength="128" required></label><p class="small muted">${reset ? '只重设上述账号的密码。该学生需要用新密码重新登录，请把新密码告知本人。' : '修改成功后本窗口可继续使用，其他窗口需要用新密码重新登录。'}</p><p id="password-error" class="form-error" role="alert"></p><p id="password-success" class="password-success" role="status"></p><button class="button" type="submit">${reset ? '确认重设此人密码' : '确认修改密码'}</button></form></section>`;
 }
 function loginView() {
   return `<main class="login-layout"><section class="login-story"><span class="eyebrow">把计算，练成小本领</span><h1>今天也来<br>算一算<span class="blue">。</span></h1><p>打开自己的作业本，<br>认真思考，再写下答案。</p>
@@ -185,7 +192,7 @@ function reviewView(a) {
   const params = routeParams(), fromHistory = params.has('historyClassId'), done = !!a.submittedAt;
   const fromAnalytics = params.has('analytics');
   const back = fromAnalytics ? analyticsHref({ filters: recordFilters(params), classId: a.reviewClassId, selection: { assignmentId: a.id, questionNumber: params.get('questionNumber') }, all: params.get('all') === '1' }) : fromHistory ? historyHref(a.student.id, recordFilters(params), Number(params.get('historyClassId'))) : reportHref(a.id, a.reviewClassId);
-  return `<a class="back-link" href="${esc(back)}">← 返回${fromAnalytics ? '班级学情' : fromHistory ? '学生练习记录' : '班级成绩表'}</a>${pageTitle('学生原卷', `${esc(a.student.name)}的作答`, `${esc(state.classes.find(c => c.id === a.reviewClassId)?.name)} · 学号 / 账号：${esc(a.student.username)}`, '<button class="button secondary" data-action="refresh">刷新原卷 ↻</button>')}<section class="panel review-summary"><h2>${esc(a.title)}</h2><p class="muted">${assignmentSummary(a)}<br>${date(a.createdAt)} 发布（北京时间） · ${deadline(a)}</p><div class="review-status ${done ? 'graded' : 'ungraded'}"><div><strong>${done ? '已交 · 已评分' : '未交、未评分'}</strong><p>${done ? `${date(a.submittedAt)} 提交 · 答对 ${a.results.filter(r => r.correct).length} / ${a.questionCount} 题` : a.savedAt ? `上次保存于 ${date(a.savedAt)}（北京时间）。以下为已保存的草稿，不含尚未保存的修改。` : '暂无已保存答案。该学生尚未提交，未评分。'}</p></div>${done ? `<div class="review-total"><strong>${a.score}</strong><span>/ 100 分</span></div>` : ''}</div><div class="actions review-links"><a class="text-button" href="${esc(reportHref(a.id, a.reviewClassId))}">班级成绩表 →</a><a class="text-button" href="${esc(historyHref(a.student.id, fromHistory ? recordFilters(params) : {}, a.student.classId))}">该生练习记录 →</a></div></section><section class="review-questions" aria-label="逐题作答详情">${a.expressions.map((expression, i) => `<article class="review-question ${done ? a.results[i].correct ? 'correct' : 'incorrect' : 'ungraded'}" data-review-question="${i}"><div class="section-heading"><span class="question-number">第 ${i + 1} 题</span><span class="review-verdict">${done ? a.results[i].correct ? '✓ 正确' : '✕ 错误' : '未评分'}</span></div><p class="review-expression">${esc(expression)} ＝ ?</p><dl class="review-answers"><div><dt>学生答案</dt><dd class="review-student-answer">${a.answers[i] == null ? '<span class="muted">未填</span>' : esc(a.answers[i])}</dd></div><div><dt>正确答案</dt><dd class="review-correct-answer">${a.results[i].correctAnswer}</dd></div></dl></article>`).join('')}</section>`;
+  return `<a class="back-link" href="${esc(back)}">← 返回${fromAnalytics ? '班级学情' : fromHistory ? '学生练习记录' : '班级成绩表'}</a>${pageTitle('学生原卷', `${esc(a.student.name)}的作答`, `${esc(state.classes.find(c => c.id === a.reviewClassId)?.name)} · 学号 / 账号：${esc(a.student.username)}`, '<button class="button secondary" data-action="refresh">刷新原卷 ↻</button>')}<section class="panel review-summary"><h2>${esc(a.title)}</h2><p class="muted">${assignmentSummary(a)}<br>${date(a.createdAt)} 发布（北京时间） · ${deadline(a)}</p><div class="review-status ${done ? 'graded' : 'ungraded'}"><div><strong>${done ? '已交 · 已评分' : '未交、未评分'}</strong><p>${done ? `${date(a.submittedAt)} 提交 · 答对 ${a.results.filter(r => r.correct).length} / ${a.questionCount} 题` : a.savedAt ? `上次保存于 ${date(a.savedAt)}（北京时间）。以下为已保存的草稿，不含尚未保存的修改。` : '暂无已保存答案。该学生尚未提交，未评分。'}</p></div>${done ? `<div class="review-total"><strong>${a.score}</strong><span>/ 100 分</span></div>` : ''}</div><div class="actions review-links"><a class="text-button" href="${esc(reportHref(a.id, a.reviewClassId))}">班级成绩表 →</a><a class="text-button" href="${esc(historyHref(a.student.id, fromHistory ? recordFilters(params) : {}, a.student.classId))}">该生练习记录 →</a></div></section><section class="review-questions" aria-label="逐题作答详情">${a.expressions.map((expression, i) => `<article class="review-question ${done ? a.results[i].correct ? 'correct' : 'incorrect' : 'ungraded'}" data-review-question="${i}"><div class="section-heading"><span class="question-number">第 ${i + 1} 题</span><span class="review-verdict">${done ? a.results[i].missing ? '漏答' : a.results[i].correct ? '✓ 正确' : '✕ 错误' : '未评分'}</span></div><p class="review-expression">${esc(expression)} ＝ ?</p><dl class="review-answers"><div><dt>学生答案</dt><dd class="review-student-answer">${a.answers[i] == null ? `<span class="muted">${done ? '漏答（未填）' : '未填'}</span>` : esc(a.answers[i])}</dd></div><div><dt>正确答案</dt><dd class="review-correct-answer">${a.results[i].correctAnswer}</dd></div></dl></article>`).join('')}</section>`;
 }
 function calendarHref(month, day, classId = state.classId) {
   const params = new URLSearchParams({ classId: String(classId) });
@@ -254,7 +261,7 @@ function matchingStudents() {
   return state.students.filter(s => s.name.toLowerCase().includes(query) || s.username.toLowerCase().includes(query));
 }
 function studentsTable(students) {
-  return students.length ? `<div class="table-wrap"><table><thead><tr><th scope="col">姓名</th><th scope="col">学号 / 登录账号</th><th scope="col">所在班级</th></tr></thead><tbody>${students.map(s => `<tr><td><a class="student-record-link" href="${historyHref(s.id)}"><span class="avatar">${esc(s.name.slice(0, 1))}</span>${esc(s.name)}<small>练习记录 →</small></a></td><td class="mono">${esc(s.username)}</td><td><select data-student-class="${s.id}" aria-label="${esc(s.name)}（${esc(s.username)}）的班级">${classOptions(s.classId)}</select></td></tr>`).join('')}</tbody></table></div>` : state.students.length ? '<div class="empty"><h3>没有找到匹配的学生</h3><p>可更换姓名或学号，或清空搜索查看整班名单。</p></div>' : '<div class="empty"><h3>本班还没有学生</h3><p>导入名单、创建账号，或切换班级调整已有学生的归属。</p></div>';
+  return students.length ? `<div class="table-wrap"><table><thead><tr><th scope="col">姓名</th><th scope="col">学号 / 登录账号</th><th scope="col">所在班级</th><th scope="col">账号操作</th></tr></thead><tbody>${students.map(s => `<tr><td><a class="student-record-link" href="${historyHref(s.id)}"><span class="avatar">${esc(s.name.slice(0, 1))}</span>${esc(s.name)}<small>练习记录 →</small></a></td><td class="mono">${esc(s.username)}</td><td><select data-student-class="${s.id}" aria-label="${esc(s.name)}（${esc(s.username)}）的班级">${classOptions(s.classId)}</select></td><td><a class="reset-password-link" href="#/students/${s.id}/password?classId=${state.classId}" aria-label="重设 ${esc(s.name)}（${esc(s.username)}）的密码">重设密码</a></td></tr>`).join('')}</tbody></table></div>` : state.students.length ? '<div class="empty"><h3>没有找到匹配的学生</h3><p>可更换姓名或学号，或清空搜索查看整班名单。</p></div>' : '<div class="empty"><h3>本班还没有学生</h3><p>导入名单、创建账号，或切换班级调整已有学生的归属。</p></div>';
 }
 function updateStudentSearch() {
   const list = document.querySelector('#student-list');
@@ -288,7 +295,7 @@ function mistakesView() {
   const items = state.mistakes;
   return `${pageTitle('每天进步一点点', '我的错题本', '收录第一次交卷时做错的题；订正后仍保留原作答和原分数。', '<button class="button secondary" data-action="refresh">刷新错题 ↻</button>')}<div class="mistake-overview"><span class="badge">共 ${items.length} 道错题</span><span class="badge done">最近订正正确 ${items.filter(i => i.lastAttemptCorrect).length} 道</span><span class="small muted">按原交卷时间，最近在前</span></div><section class="mistake-grid">${items.map(a => {
     const key = `${a.assignmentId}:${a.questionNumber}`, history = state.mistakeHistories[key];
-    return `<article class="panel mistake-card" data-mistake="${key}"><div class="section-heading"><span class="eyebrow">第 ${a.questionNumber} 题</span><span class="badge ${a.lastAttemptCorrect ? 'done' : 'draft'}">${a.lastAttemptCorrect ? '最近订正正确' : a.attemptCount ? '继续订正' : '还未订正'}</span></div><p class="mistake-expression">${esc(a.expression)} ＝ ?</p><a class="mistake-origin" href="${mistakeHref(a, true)}">${esc(a.title)} · 第 ${a.questionNumber} 题 ↗</a><p class="small muted">${date(a.submittedAt)} 首次交卷 · 当时的答案：${a.originalAnswer == null ? '未填' : esc(a.originalAnswer)}</p><p class="mistake-progress">已订正 ${a.attemptCount} 次${a.firstCorrectAttempt ? ` · 第 ${a.firstCorrectAttempt} 次首次做对` : ''}</p><div class="actions"><a class="button" href="${mistakeHref(a)}">订正 →</a>${a.attemptCount ? `<button class="text-button" data-action="correction-history" data-assignment="${a.assignmentId}" data-number="${a.questionNumber}">${history ? '收起订正记录' : '查看订正记录'}</button>` : ''}</div>${history ? `<section class="mistake-history" aria-label="第 ${a.questionNumber} 题订正记录">${attemptsTable(history)}</section>` : ''}</article>`;
+    return `<article class="panel mistake-card" data-mistake="${key}"><div class="section-heading"><span class="eyebrow">第 ${a.questionNumber} 题</span><span class="badge ${a.lastAttemptCorrect ? 'done' : 'draft'}">${a.lastAttemptCorrect ? '最近订正正确' : a.attemptCount ? '继续订正' : '还未订正'}</span></div><p class="mistake-expression">${esc(a.expression)} ＝ ?</p><a class="mistake-origin" href="${mistakeHref(a, true)}">${esc(a.title)} · 第 ${a.questionNumber} 题 ↗</a><p class="small muted">${date(a.submittedAt)} 首次交卷 · 当时的答案：${a.originalStatus === 'missing' ? '漏答（未填）' : esc(a.originalAnswer)}</p><p class="mistake-progress">已订正 ${a.attemptCount} 次${a.firstCorrectAttempt ? ` · 第 ${a.firstCorrectAttempt} 次首次做对` : ''}</p><div class="actions"><a class="button" href="${mistakeHref(a)}">订正 →</a>${a.attemptCount ? `<button class="text-button" data-action="correction-history" data-assignment="${a.assignmentId}" data-number="${a.questionNumber}">${history ? '收起订正记录' : '查看订正记录'}</button>` : ''}</div>${history ? `<section class="mistake-history" aria-label="第 ${a.questionNumber} 题订正记录">${attemptsTable(history)}</section>` : ''}</article>`;
   }).join('') || '<div class="empty panel"><h2>暂时没有错题</h2><p>交卷后，第一次答错的题会收在这里。草稿和未交作业不收录。</p><a class="button secondary" href="#/">返回我的作业</a></div>'}</section>`;
 }
 function correctionView() {
@@ -322,8 +329,8 @@ function workbook(a) {
   if (a.timeLimitMinutes && !a.startedAt && !done) return `<a class="back-link" href="#/">← 返回我的作业</a>${pageTitle('限时练习', esc(a.title), `${assignmentSummary(a)} · ${deadline(a)}`)}<section class="panel"><h2>准备好后开始作答</h2><p>点击后开始计时，刷新或重新登录不会暂停。个人限时和全班截止以先到者为准；到点仍可保存草稿，未提交计为未交。</p><button class="button" data-action="start" ${closed(a) ? 'disabled' : ''}>${closed(a) ? '已截止，不能开始' : '开始作答'}</button><p id="start-error" class="form-error" role="alert"></p></section>`;
   const count = a.answers.filter(v => v !== null).length;
   return `<a class="back-link" href="${original ? '#/mistakes' : '#/'}">← 返回${original ? '我的错题本' : '我的作业'}</a>${sourceNote}<div class="workbook-heading">${pageTitle(done ? '练习完成' : '专心算一算', esc(a.title), `${assignmentSummary(a)} · 每题 ${100 / a.questionCount} 分 · ${a.category === 'composite' ? '按每题标注的范围填写整数' : `答案是 0–${a.answerMax} 的整数`} · ${deadline(a)}`)}${done ? `<div class="score-stamp"><strong>${a.score}</strong><span>/ 100 分</span></div>` : ''}</div>
-    ${done ? `<div class="result-banner"><strong>${a.score === 100 ? '全部答对，真棒！' : `答对了 ${a.results.filter(r => r.correct).length} / ${a.questionCount} 道题，再看看需要订正的地方。`}</strong><span>${date(a.submittedAt)} 提交 · 已自动批改</span></div>` : `<div class="progress-heading"><span id="progress-label">已作答 ${count} / ${a.questionCount} 题</span><span id="save-state" class="muted">${a.savedAt ? `草稿保存于 ${date(a.savedAt)}` : '写好几题后，可以先保存草稿。'}</span></div><progress id="progress" max="${a.questionCount}" value="${count}" aria-label="作答进度"></progress>`}
-    ${a.timeLimitMinutes && !done ? `<div class="timer-panel"><strong id="countdown" role="timer"></strong><span>开始于 ${date(a.startedAt)} · 最晚 ${date(a.effectiveDueAt)}（北京时间）</span></div>` : ''}<p id="deadline-state" class="deadline-message" role="status" hidden></p><form id="answer-form"><fieldset ${done ? 'disabled' : ''}><legend class="sr-only">${a.questionCount} 道计算题</legend><div class="question-grid">${a.expressions.map((expression, i) => `<div data-original-question="${i + 1}" class="question ${original && Number(original[2]) === i + 1 ? 'source-question' : ''} ${done ? (a.results[i].correct ? 'correct' : 'incorrect') : ''}"><span class="question-number">第 ${i + 1} 题${a.category === 'composite' ? ` · 答案 0–${a.answerMaxes[i]}` : ''}</span><div class="equation"><label for="answer-${i}"><span class="sr-only">第 ${i + 1} 题：</span>${esc(expression)} <span class="operator">＝</span></label><input id="answer-${i}" name="answer-${i}" type="number" min="0" max="${a.answerMaxes?.[i] ?? a.answerMax}" step="1" inputmode="numeric" autocomplete="off" aria-label="第 ${i + 1} 题答案" value="${esc(a.answers[i])}" ${done ? 'readonly' : ''}></div>${done ? `<div class="question-feedback">${a.results[i].correct ? '✓ 答对了' : `✕ 正确答案：${a.results[i].correctAnswer}`}</div>` : ''}</div>`).join('')}</div></fieldset>
+    ${done ? `<div class="result-banner"><strong>${a.score === 100 ? '全部答对，真棒！' : `答对了 ${a.results.filter(r => r.correct).length} / ${a.questionCount} 道题，再看看需要订正的地方。`}</strong><span>${date(a.submittedAt)} 提交 · 已自动批改</span></div>` : `<div class="progress-heading"><span id="progress-label">已作答 ${count} / ${a.questionCount} 题</span><span id="save-state" class="muted" role="status" aria-live="polite">${a.savedAt ? `草稿保存于 ${date(a.savedAt)}` : '停笔一会儿会自动保存，也可手动保存。'}</span></div><progress id="progress" max="${a.questionCount}" value="${count}" aria-label="作答进度"></progress>`}
+    ${a.timeLimitMinutes && !done ? `<div class="timer-panel"><strong id="countdown" role="timer"></strong><span>开始于 ${date(a.startedAt)} · 最晚 ${date(a.effectiveDueAt)}（北京时间）</span></div>` : ''}<p id="deadline-state" class="deadline-message" role="status" hidden></p>${!done ? '<section id="draft-conflict" class="draft-conflict" role="alert" hidden><p></p><div class="actions"><button class="button secondary" data-action="load-saved-draft">载入已保存草稿</button><button class="button" data-action="keep-local-draft">保留本页答案并保存</button></div></section>' : ''}<form id="answer-form"><fieldset ${done ? 'disabled' : ''}><legend class="sr-only">${a.questionCount} 道计算题</legend><div class="question-grid">${a.expressions.map((expression, i) => `<div data-original-question="${i + 1}" class="question ${original && Number(original[2]) === i + 1 ? 'source-question' : ''} ${done ? (a.results[i].correct ? 'correct' : 'incorrect') : ''}"><span class="question-number">第 ${i + 1} 题${a.category === 'composite' ? ` · 答案 0–${a.answerMaxes[i]}` : ''}</span><div class="equation"><label for="answer-${i}"><span class="sr-only">第 ${i + 1} 题：</span>${esc(expression)} <span class="operator">＝</span></label><input id="answer-${i}" name="answer-${i}" type="number" min="0" max="${a.answerMaxes?.[i] ?? a.answerMax}" step="1" inputmode="numeric" autocomplete="off" aria-label="第 ${i + 1} 题答案" value="${esc(a.answers[i])}" ${done ? 'readonly' : ''}></div>${done ? `<div class="question-feedback">${a.results[i].missing ? `漏答 · 正确答案：${a.results[i].correctAnswer}` : a.results[i].correct ? '✓ 答对了' : `✕ 正确答案：${a.results[i].correctAnswer}`}</div>` : ''}</div>`).join('')}</div></fieldset>
     ${done ? '<div class="actions result-actions"><a class="button secondary" href="#/">返回我的作业</a><span class="muted">作业已提交，答案不能再修改。</span></div>' : `<div class="answer-actions"><div><strong>慢慢算，认真检查。</strong><p class="small muted">保存草稿后，下次登录可以接着写。</p></div><div class="actions"><button type="button" class="button secondary" data-action="save">保存草稿</button><button type="submit" class="button" data-submit>提交作业 →</button></div></div><p id="answer-error" class="form-error" role="alert"></p>`}</form>`;
 }
 function render() {
@@ -331,6 +338,7 @@ function render() {
   if (!state.user) view = loginView();
   else if (state.loading) view = '<p class="loading">正在打开作业本…</p>';
   else if (state.loadError) view = `<section class="empty panel"><h2>作业本暂时没有打开</h2><p>${esc(state.loadError)}</p><button class="button" data-action="refresh">重新加载</button><p><a href="#/">返回作业列表</a></p></section>`;
+  else if (state.passwordStudent || (routePath() === '#/password' && state.user.role === 'student')) view = passwordView();
   else if (state.correction) view = correctionView();
   else if (state.mistakes) view = mistakesView();
   else if (state.reviewData) view = reviewView(state.reviewData);
@@ -348,8 +356,9 @@ function render() {
 }
 async function load() {
   if (!state.user) { render(); return; }
+  resetDraftSaving();
   const epoch = ++loadEpoch;
-  state.loading = true; state.loadError = ''; state.assignment = null; state.analyticsData = null; state.calendarData = null; state.calendarBack = null; state.historyData = null; state.reviewData = null; state.mistakes = null; state.correction = null; state.mistakeHistories = {}; render();
+  state.loading = true; state.loadError = ''; state.assignment = null; state.passwordStudent = null; state.analyticsData = null; state.calendarData = null; state.calendarBack = null; state.historyData = null; state.reviewData = null; state.mistakes = null; state.correction = null; state.mistakeHistories = {}; render();
   try {
     const path = routePath(), params = new URLSearchParams(location.hash.split('?')[1] ?? '');
     if (state.user.role === 'teacher') {
@@ -382,6 +391,12 @@ async function load() {
       if (epoch !== loadEpoch) return;
       state.analyticsData = data; state.analyticsAll = params.get('all') === '1';
       history.replaceState(null, '', analyticsHref({ filters: data.filters, selection: data.selectedQuestion }));
+    } else if (/^#\/students\/[1-9]\d*\/password$/.test(path) && state.user.role === 'teacher') {
+      const students = await api(`/students?classId=${state.classId}`);
+      if (epoch !== loadEpoch) return;
+      const pupil = students.find(s => s.id === Number(path.split('/')[2]));
+      if (!pupil) throw new Error('该学生不在当前班级，请返回名单重新选择');
+      state.passwordStudent = pupil;
     } else if (historyMatch && state.user.role === 'teacher') {
       const students = await api(`/students?classId=${state.classId}`);
       if (epoch !== loadEpoch) return;
@@ -450,6 +465,14 @@ async function formAction(form, errorId, action) {
 root.addEventListener('submit', async event => {
   event.preventDefault();
   const form = event.target;
+  if (form.id === 'password-form') await formAction(form, 'password-error', async data => {
+    document.querySelector('#password-success').textContent = '';
+    if (data.newPassword !== data.confirmPassword) throw new Error('两次输入的新密码不一致');
+    const pupil = state.passwordStudent;
+    await api(pupil ? `/students/${pupil.id}/password` : '/me/password', 'PUT', pupil ? { classId: state.classId, newPassword: data.newPassword } : { currentPassword: data.currentPassword, newPassword: data.newPassword });
+    form.reset();
+    document.querySelector('#password-success').textContent = pupil ? `已重设 ${pupil.name}（${pupil.username}）的密码，请告知该学生。` : '密码已修改，请在下次登录时使用新密码。';
+  });
   if (form.id === 'analytics-filter-form' && !state.busy) {
     const filters = Object.fromEntries(new FormData(form));
     if (filters.from && filters.to && filters.from > filters.to) { errorAt('analytics-error', '开始日期不能晚于结束日期'); return; }
@@ -465,7 +488,7 @@ root.addEventListener('submit', async event => {
   }
   if (form.id === 'login-form') await formAction(form, 'login-error', async data => {
     resetPublish();
-    state.user = await api('/login', 'POST', data); state.dirty = false; state.assignments = []; state.students = []; state.importResult = null; state.studentQuery = ''; state.analyticsData = null; state.calendarData = null; state.calendarBack = null; state.historyData = null; state.reviewData = null; state.mistakes = null; state.correction = null; state.mistakeHistories = {}; state.assignment = null;
+    state.user = await api('/login', 'POST', data); state.dirty = false; state.assignments = []; state.students = []; state.importResult = null; state.studentQuery = ''; state.passwordStudent = null; state.analyticsData = null; state.calendarData = null; state.calendarBack = null; state.historyData = null; state.reviewData = null; state.mistakes = null; state.correction = null; state.mistakeHistories = {}; state.assignment = null;
     history.replaceState(null, '', '#/'); await load();
   });
   if (form.id === 'publish-form') await requestPreview(form);
@@ -491,30 +514,85 @@ root.addEventListener('submit', async event => {
   });
   if (form.id === 'answer-form' && !state.busy) {
     if (closed(state.assignment)) { syncDeadlineUI(); errorAt('answer-error', closedMessage); }
-    else dialog.showModal();
+    else {
+      const missing = readAnswers(form).filter(a => a === null).length, message = document.querySelector('#submit-missing');
+      message.hidden = !missing;
+      message.textContent = missing ? `还有 ${missing} 题没答。可以返回补答，也能确认按现有答案交卷；空题记为漏答，按整张卷的题数计分。` : '';
+      document.querySelector('#confirm-submit').textContent = missing ? '确认按现有答案交卷' : '确认提交';
+      dialog.showModal();
+    }
   }
 });
+function readAnswers(form = document.querySelector('#answer-form')) {
+  return Array.from({ length: state.assignment.questionCount }, (_, i) => { const value = form.elements[`answer-${i}`].value; return value === '' ? null : Number(value); });
+}
+function saveStatus(message) { const node = document.querySelector('#save-state'); if (node) node.textContent = message; }
+function scheduleAutosave(delay = 1000) {
+  clearTimeout(autosaveTimer);
+  if (state.user?.role === 'student' && state.assignment && !state.assignment.submittedAt && state.dirty && !state.busy && !draftConflict) autosaveTimer = setTimeout(() => saveDraft(), delay);
+}
+function showDraftConflict(error) {
+  clearTimeout(autosaveTimer);
+  draftConflict = { revision: error.draftRevision, submitted: error.code !== 'DRAFT_CONFLICT' };
+  const panel = document.querySelector('#draft-conflict');
+  if (panel) { panel.hidden = false; panel.querySelector('p').textContent = error.message; panel.querySelector('[data-action="keep-local-draft"]').hidden = draftConflict.submitted; }
+  saveStatus('自动保存已暂停 · 本页答案仍保留');
+}
+async function saveDraft(manual = false) {
+  if (!state.assignment || state.assignment.submittedAt || state.user?.role !== 'student' || state.busy || draftConflict) return false;
+  clearTimeout(autosaveTimer);
+  if (draftFlight) { await draftFlight; return manual && state.dirty ? saveDraft(true) : !state.dirty; }
+  const form = document.querySelector('#answer-form');
+  if (!form || !(manual ? form.reportValidity() : form.checkValidity())) { saveStatus('答案格式有误，请修正后保存'); return false; }
+  const answers = readAnswers(form), epoch = loadEpoch, a = state.assignment, button = form.querySelector('[data-action="save"]');
+  const current = () => epoch === loadEpoch && state.assignment === a && form.isConnected;
+  saveStatus('正在保存草稿…'); if (button) button.disabled = true;
+  errorAt('answer-error', '');
+  const flight = (async () => {
+    try {
+      const saved = await api(`/assignments/${a.id}/draft`, 'PUT', { answers, draftRevision: a.draftRevision });
+      if (!current()) return false;
+      a.answers = saved.answers; a.savedAt = saved.savedAt; a.draftRevision = saved.draftRevision;
+      state.dirty = JSON.stringify(readAnswers(form)) !== JSON.stringify(answers); draftRetryDelay = 1000;
+      saveStatus(state.dirty ? '有新修改，稍后自动保存' : `已保存 · 草稿保存于 ${date(saved.savedAt)}`);
+      if (manual && !state.dirty) toast('草稿已保存，下次可以接着写。');
+      return true;
+    } catch (e) {
+      if (!current()) return false;
+      errorAt('answer-error', e.message);
+      if (e.status === 409) showDraftConflict(e);
+      else { saveStatus('保存失败 · 本页答案仍保留，将自动重试'); draftRetryDelay = Math.min(30000, Math.max(3000, draftRetryDelay * 2)); }
+      return false;
+    } finally { if (current() && button) button.disabled = false; }
+  })();
+  draftFlight = flight;
+  try { return await flight; }
+  finally { if (draftFlight === flight) { draftFlight = null; if (current()) scheduleAutosave(draftRetryDelay); } }
+}
 async function saveAnswers(submit = false) {
+  if (!submit) return saveDraft(true);
   if (state.busy || !state.assignment || state.assignment.submittedAt) return;
   if (submit && closed(state.assignment)) { syncDeadlineUI(); errorAt('answer-error', closedMessage); return; }
   const form = document.querySelector('#answer-form');
   if (!form.reportValidity()) return;
-  const answers = Array.from({ length: state.assignment.questionCount }, (_, i) => {
-    const value = form.elements[`answer-${i}`].value; return value === '' ? null : Number(value);
-  });
-  if (submit && answers.includes(null)) { errorAt('answer-error', `还有题目未作答，请完成全部 ${state.assignment.questionCount} 题再提交。`); document.querySelector(`#answer-${answers.indexOf(null)}`).focus(); return; }
+  const answers = readAnswers(form);
+  clearTimeout(autosaveTimer);
   state.busy = true;
   const fieldset = form.querySelector('fieldset'); fieldset.disabled = true;
   form.querySelectorAll('button').forEach(b => { b.disabled = true; });
   errorAt('answer-error', '');
   try {
-    state.assignment = await api(`/assignments/${state.assignment.id}/${submit ? 'submit' : 'draft'}`, submit ? 'POST' : 'PUT', { answers });
+    if (draftFlight) await draftFlight;
+    if (!state.assignment || !form.isConnected) return;
+    if (draftConflict) { errorAt('answer-error', '请先处理草稿冲突，再确认交卷。本页答案仍保留。'); return; }
+    state.assignment = await api(`/assignments/${state.assignment.id}/submit`, 'POST', { answers, draftRevision: state.assignment.draftRevision, allowIncomplete: answers.includes(null) });
     state.dirty = false; render(); toast(submit ? '作业已提交，批改结果出来啦！' : '草稿已保存，下次可以接着写。');
   } catch (e) {
-    if (submit && e.status === 409) state.assignment.isClosed = true;
+    if (e.code === 'DRAFT_CONFLICT') showDraftConflict(e);
+    else if (e.status === 409 && e.message.includes('已截止')) state.assignment.isClosed = true;
     errorAt('answer-error', e.message);
   }
-  finally { state.busy = false; fieldset.disabled = false; form.querySelectorAll('button').forEach(b => { b.disabled = false; }); syncDeadlineUI(); }
+  finally { state.busy = false; fieldset.disabled = false; form.querySelectorAll('button').forEach(b => { b.disabled = false; }); syncDeadlineUI(); scheduleAutosave(); }
 }
 root.addEventListener('input', event => {
   if (event.target.name === 'correctionAnswer') { state.correction.answer = event.target.value; state.dirty = true; }
@@ -526,7 +604,8 @@ root.addEventListener('input', event => {
     const count = inputs.filter(input => input.value !== '').length;
     document.querySelector('#progress').value = count;
     document.querySelector('#progress-label').textContent = `已作答 ${count} / ${state.assignment.questionCount} 题`;
-    document.querySelector('#save-state').textContent = '有未保存的修改';
+    saveStatus(draftConflict ? '自动保存已暂停 · 本页答案仍保留' : '有未保存的修改，停笔后自动保存');
+    scheduleAutosave();
   }
 });
 root.addEventListener('change', async event => {
@@ -565,6 +644,10 @@ root.addEventListener('change', async event => {
 root.addEventListener('click', async event => {
   const action = event.target.closest('[data-action]')?.dataset.action;
   if (state.busy && (event.target.closest('a') || action)) { event.preventDefault(); return; }
+  if (action === 'load-saved-draft' && confirm('将载入已保存的答案，放弃本页尚未保存的修改。确定继续吗？')) { state.dirty = false; await load(); }
+  if (action === 'keep-local-draft' && draftConflict && !draftConflict.submitted && confirm('将以本页答案替换其他窗口已保存的草稿。确定保留本页答案吗？')) {
+    state.assignment.draftRevision = draftConflict.revision; draftConflict = null; document.querySelector('#draft-conflict').hidden = true; await saveDraft(true);
+  }
   if (action === 'analytics-list') document.querySelector('#analytics-list')?.scrollIntoView?.({ block: 'start' });
   if (event.target.closest('[data-analytics-question]')?.getAttribute('href') === location.hash) { event.preventDefault(); document.querySelector('#analytics-detail')?.scrollIntoView?.({ block: 'start' }); }
   if (action === 'save') await saveAnswers();
@@ -599,11 +682,11 @@ root.addEventListener('click', async event => {
     catch (e) { errorAt('start-error', e.message); }
     finally { state.busy = false; }
   }
-  if (action === 'refresh') await load();
+  if (action === 'refresh' && (!state.dirty || confirm('还有未保存的答案。确定重新加载并放弃这些修改吗？'))) { state.dirty = false; await load(); }
   if (action === 'logout') {
     if (state.dirty && !confirm('还有未保存的答案。确定退出并放弃这些修改吗？')) return;
     state.busy = true;
-    try { await api('/logout', 'POST', {}); loadEpoch++; resetPublish(); state.user = null; state.assignment = null; state.assignments = []; state.students = []; state.importResult = null; state.studentQuery = ''; state.analyticsData = null; state.calendarData = null; state.calendarBack = null; state.historyData = null; state.reviewData = null; state.mistakes = null; state.correction = null; state.mistakeHistories = {}; state.dirty = false; history.replaceState(null, '', '#/'); render(); }
+    try { await api('/logout', 'POST', {}); loadEpoch++; resetDraftSaving(); resetPublish(); state.user = null; state.assignment = null; state.assignments = []; state.students = []; state.importResult = null; state.studentQuery = ''; state.passwordStudent = null; state.analyticsData = null; state.calendarData = null; state.calendarBack = null; state.historyData = null; state.reviewData = null; state.mistakes = null; state.correction = null; state.mistakeHistories = {}; state.dirty = false; history.replaceState(null, '', '#/'); render(); }
     catch (e) { toast(e.message, true); }
     finally { state.busy = false; }
   }
@@ -628,3 +711,5 @@ await load();
 
 setInterval(syncDeadlineUI, 1000);
 window.addEventListener('focus', syncDeadlineUI);
+window.addEventListener('online', () => scheduleAutosave());
+window.addEventListener('focus', () => scheduleAutosave());

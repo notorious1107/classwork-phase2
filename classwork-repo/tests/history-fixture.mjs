@@ -34,7 +34,7 @@ export function snapshot(db) {
       for (const name of ['time_limit_minutes', 'question_count', 'difficulty', 'mixed_grade', 'knowledge_points', 'selected_categories', 'question_categories']) a[name] ??= null;
       return a;
     }),
-    submissions: db.prepare('SELECT * FROM submissions ORDER BY assignment_id, student_id').all()
+    submissions: db.prepare('SELECT * FROM submissions ORDER BY assignment_id, student_id').all().map(s => ({ ...s, draft_revision: s.draft_revision ?? 0 }))
   };
 }
 

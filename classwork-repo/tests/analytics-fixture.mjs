@@ -11,7 +11,7 @@ export function seedAnalytics(db) {
   const a = publishAssignment(db, '周二练习 <A>', {classIds:[1,2]});
   const b = publishAssignment(db, '周四练习 B', {classIds:[1]});
   for (const [id, stamp] of [[a,'2026-11-16T16:00:00Z'],[b,'2026-11-19T15:59:59.999Z']]) db.prepare('UPDATE assignments SET questions=?,created_at=?,due_at=? WHERE id=?').run(JSON.stringify(questions),stamp,'2026-11-24T12:00:00Z',id);
-  const save = (id, student, answers, score, submitted=true) => db.prepare('INSERT INTO submissions VALUES(?,?,?,?,?,?)').run(id,ids[student],JSON.stringify(answers),'2026-11-23T08:00:00Z',submitted?'2026-11-23T08:00:00Z':null,score);
+  const save = (id, student, answers, score, submitted=true) => db.prepare('INSERT INTO submissions(assignment_id,student_id,answers,saved_at,submitted_at,score) VALUES(?,?,?,?,?,?)').run(id,ids[student],JSON.stringify(answers),'2026-11-23T08:00:00Z',submitted?'2026-11-23T08:00:00Z':null,score);
   save(a,'lin',[1,null,...key.slice(2)],80); save(a,'nan',key,100);
   save(a,'draft',[0,...Array(9).fill(null)],null,false);
   save(a,'zhou',key.map((n,i)=>i<6?n+1:n),40);
