@@ -10,13 +10,13 @@ $target = 'root@10.176.34.96'
 $repository = $PSScriptRoot
 $revision = git -C $repository rev-parse --verify HEAD
 if ($LASTEXITCODE -ne 0) { throw 'Cannot read the project Git revision.' }
-$changes = git -C $repository status --porcelain -- classwork-repo/backend classwork-repo/frontend
+$changes = git -C $repository status --porcelain -- classwork-repo/backend classwork-repo/frontend classwork-repo/package.json classwork-repo/package-lock.json
 if ($LASTEXITCODE -ne 0) { throw 'Cannot check the working tree.' }
 if ($changes) { Write-Warning 'Uncommitted application changes are present. This run uses the committed version.' }
 
 $archive = Join-Path ([IO.Path]::GetTempPath()) ("classwork-" + [guid]::NewGuid().ToString('N') + ".tar.gz")
 try {
-    git -C $repository -c core.autocrlf=false archive --format=tar.gz "--output=$archive" "${revision}:classwork-repo" backend frontend
+    git -C $repository -c core.autocrlf=false archive --format=tar.gz "--output=$archive" "${revision}:classwork-repo" backend frontend package.json package-lock.json
     if ($LASTEXITCODE -ne 0) { throw 'Cannot package the application.' }
     $digest = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
     $payload = [Convert]::ToBase64String([IO.File]::ReadAllBytes($archive), [Base64FormattingOptions]::InsertLineBreaks)
@@ -51,6 +51,9 @@ main() {
     health() {
         curl --noproxy '*' -fsS --max-time 2 "$url/api/health" 2>/dev/null | grep -Fq '"ok":true' &&
             curl --noproxy '*' -fsS --max-time 2 -o /dev/null "$url/"
+    }
+    runtime_ready() {
+        docker exec -w /app "$container" node --input-type=module -e 'await import("./backend/app.mjs")' >/dev/null 2>&1
     }
     wait_ready() {
         local attempt
@@ -92,12 +95,14 @@ CLASSWORK_ARCHIVE
         mkdir "$stage/app"
         tar -xzf "$stage/app.tar.gz" --no-same-owner --no-same-permissions -C "$stage/app"
     )
-    if diff -qr "$stage/app/backend" "$app/backend" >/dev/null && diff -qr "$stage/app/frontend" "$app/frontend" >/dev/null; then
-        if health; then echo "UP TO DATE  $url  ($revision)"; return 0; fi
-        if [[ "$mode" == check ]]; then echo 'Code matches; website health check failed.' >&2; return 1; fi
-        if [[ "$(docker inspect -f '{{.State.Running}}' "$container")" == false ]]; then docker start "$container" >/dev/null; fi
-        wait_ready || { echo "Health check failed. Check docker logs $container." >&2; return 1; }
-        echo "READY  $url  ($revision)"; return 0
+    if cmp -s "$stage/app/package.json" "$app/package.json" && cmp -s "$stage/app/package-lock.json" "$app/package-lock.json" &&
+       diff -qr "$stage/app/backend" "$app/backend" >/dev/null && diff -qr "$stage/app/frontend" "$app/frontend" >/dev/null; then
+        if health && runtime_ready; then echo "UP TO DATE  $url  ($revision)"; return 0; fi
+        if [[ "$mode" == check ]]; then echo 'Code matches; check the website and installed dependencies.' >&2; return 1; fi
+        if [[ "$(docker inspect -f '{{.State.Running}}' "$container")" == false ]]; then
+            docker start "$container" >/dev/null
+            if wait_ready && runtime_ready; then echo "READY  $url  ($revision)"; return 0; fi
+        fi
     fi
     if [[ "$mode" == check ]]; then
         echo "UPDATE AVAILABLE  $revision"
@@ -105,7 +110,21 @@ CLASSWORK_ARCHIVE
         return 0
     fi
     # Carry forward the installation's LAN launcher and other deployment files.
-    tar -C "$app" --exclude=./backend --exclude=./frontend -cf - . | tar -C "$stage/app" -xpf -
+    tar -C "$app" --exclude=./backend --exclude=./frontend --exclude=./node_modules --exclude=./package.json --exclude=./package-lock.json -cf - . | tar -C "$stage/app" -xpf -
+    # Build the locked production dependencies in the deployed image before stopping the live service.
+    image=$(docker inspect -f '{{.Image}}' "$container")
+    docker run --rm --user 0:0 -w /app -v "$stage/app:/app:Z" --entrypoint npm "$image" \
+        ci --omit=dev --ignore-scripts --no-audit --no-fund --cache /tmp/npm-cache
+    docker run --rm --network none --user "$(docker inspect -f '{{.Config.User}}' "$container")" \
+        -w /app -v "$stage/app:/app:ro,Z" --entrypoint node "$image" --experimental-sqlite --input-type=module -e '
+            import { readFileSync } from "node:fs";
+            import { createApp } from "./backend/app.mjs";
+            import { parseRoster } from "./backend/roster.mjs";
+            const roster = await parseRoster("xlsx", readFileSync("./frontend/student-roster-template.xlsx"));
+            if (!roster.length || roster.some(row => row.errors.length)) throw Error("Roster template could not be imported");
+            const app = await createApp({ dbPath: ":memory:" });
+            app.db.close();
+        '
     if command -v selinuxenabled >/dev/null && selinuxenabled; then
         chcon -R --reference="$app" "$stage/app"
     fi
