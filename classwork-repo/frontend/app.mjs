@@ -1,7 +1,7 @@
 const root = document.querySelector('#app');
 const notice = document.querySelector('#notice');
 const dialog = document.querySelector('#submit-dialog');
-const state = { user: null, assignments: [], students: [], classes: [], classId: null, importResult: null, studentQuery: '', practiceOptions: null, assignment: null, dirty: false, busy: false, route: '', loading: false, loadError: '' };
+const state = { user: null, assignments: [], students: [], classes: [], classId: null, importResult: null, studentQuery: '', calendarData: null, calendarDay: '', calendarBack: null, practiceOptions: null, assignment: null, dirty: false, busy: false, route: '', loading: false, loadError: '' };
 let loadEpoch = 0;
 let toastTimer;
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -41,7 +41,7 @@ async function api(path, method = 'GET', data) {
   for (const a of Array.isArray(result) ? result : [result]) if (a.serverNow) a.receivedAt = performance.now();
   if (!response.ok) {
     if (response.status === 401 && state.user) {
-      loadEpoch++; state.user = null; state.dirty = false; state.assignment = null; state.assignments = []; state.students = []; state.importResult = null; state.studentQuery = ''; render();
+      loadEpoch++; state.user = null; state.dirty = false; state.assignment = null; state.assignments = []; state.students = []; state.importResult = null; state.studentQuery = ''; state.calendarData = null; state.calendarBack = null; render();
     }
     throw Object.assign(new Error(result.error || '操作失败，请重试'), { status: response.status });
   }
@@ -51,8 +51,9 @@ function badge(a) {
   return a.submittedAt ? '<span class="badge done">已批改</span>' : closed(a) ? '<span class="badge overdue">已截止 · 未交</span>' : a.savedAt ? '<span class="badge draft">草稿</span>' : '<span class="badge">待完成</span>';
 }
 function header() {
+  const inCalendar = routePath() === '#/calendar' || !!state.calendarBack;
   return `<header class="header"><a href="#/" class="brand"><span class="brand-mark">＋</span><span>小小算术<small>班级作业本</small></span></a>
-    ${state.user ? `<nav aria-label="主导航"><a href="#/" ${!location.hash.includes('students') ? 'aria-current="page"' : ''}>${state.user.role === 'teacher' ? '作业与成绩' : '我的作业'}</a>${state.user.role === 'teacher' ? `<a href="#/students" ${location.hash.includes('students') ? 'aria-current="page"' : ''}>学生名单</a>` : ''}</nav>
+    ${state.user ? `<nav aria-label="主导航"><a href="#/" ${!location.hash.includes('students') && !inCalendar ? 'aria-current="page"' : ''}>${state.user.role === 'teacher' ? '作业与成绩' : '我的作业'}</a>${state.user.role === 'teacher' ? `<a href="#/calendar" ${inCalendar ? 'aria-current="page"' : ''}>练习月历</a><a href="#/students" ${location.hash.includes('students') ? 'aria-current="page"' : ''}>学生名单</a>` : ''}</nav>
     <div class="user"><span>${esc(state.user.name)}<small>${state.user.role === 'teacher' ? '教师' : '学生'} · ${esc(state.user.username)}</small></span><button class="text-button" data-action="logout">退出</button></div>` : '<span class="header-note">每天练一练，一点点进步。</span>'}</header>`;
 }
 function loginView() {
@@ -69,6 +70,31 @@ const targetFields = () => `<fieldset class="target-fields"><legend>发布给哪
 const categoryNames = {
   'add-sub-20': '20 以内加减', 'mul-div-20': '20 以内乘除', 'mixed-100': '100 以内混合运算'
 };
+const routePath = () => location.hash.split('?')[0];
+function calendarHref(month, day, classId = state.classId) {
+  const params = new URLSearchParams({ classId: String(classId) });
+  if (month) params.set('month', month);
+  if (day) params.set('day', day);
+  return `#/calendar?${params}`;
+}
+function adjacentMonth(month, offset) {
+  const d = new Date(`${month}-01T00:00:00Z`); d.setUTCMonth(d.getUTCMonth() + offset);
+  if (d.getUTCFullYear() < 1 || d.getUTCFullYear() > 9999) return null;
+  return d.toISOString().slice(0, 7);
+}
+const dayLabel = day => new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: 'numeric', day: 'numeric', weekday: 'long' }).format(new Date(`${day}T12:00:00+08:00`));
+function calendarView(c) {
+  const previous = adjacentMonth(c.month, -1), next = adjacentMonth(c.month, 1);
+  const offset = (new Date(`${c.month}-01T00:00:00Z`).getUTCDay() + 6) % 7;
+  const cells = [...Array(offset).fill(null), ...c.days];
+  while (cells.length % 7) cells.push(null);
+  const selected = c.days.find(d => d.date === state.calendarDay);
+  const rows = Array.from({ length: cells.length / 7 }, (_, week) => `<tr>${cells.slice(week * 7, week * 7 + 7).map(d => d ? `<td><a class="calendar-day ${d.date === state.calendarDay ? 'selected' : ''}" href="${calendarHref(c.month, d.date)}" aria-label="${dayLabel(d.date)}，${d.assignments.length} 份练习${d.date === state.calendarDay ? '，已选' : ''}" ${d.date === state.calendarDay ? 'aria-current="date"' : ''}><span class="calendar-day-top"><time datetime="${d.date}">${Number(d.date.slice(-2))}</time>${d.date === c.today ? '<span class="calendar-today">今</span>' : ''}</span><span class="calendar-day-count">${d.assignments.length ? `${d.assignments.length} 份` : '—'}</span><span class="calendar-titles">${d.assignments.slice(0, 2).map(a => `<span>${esc(a.title)}</span>`).join('')}${d.assignments.length > 2 ? `<span>另 ${d.assignments.length - 2} 份</span>` : ''}</span></a></td>` : '<td class="calendar-blank"></td>').join('')}</tr>`).join('');
+  return `${classPicker()}${pageTitle('班级练习簿', '练习月历', '按北京时间的发布日期查看，截止时间单独标注。', '<button class="button secondary" data-action="refresh">刷新月历 ↻</button>')}
+    <section class="panel calendar-panel"><div class="calendar-toolbar"><div class="calendar-month-control">${previous ? `<a class="button secondary" aria-label="上个月" href="${calendarHref(previous)}">‹ 上月</a>` : '<span class="button secondary" aria-disabled="true">‹ 上月</span>'}<label><span class="sr-only">查看月份</span><input type="month" name="calendarMonth" min="0001-01" max="9999-12" value="${c.month}" required></label>${next ? `<a class="button secondary" aria-label="下个月" href="${calendarHref(next)}">下月 ›</a>` : '<span class="button secondary" aria-disabled="true">下月 ›</span>'}</div><a class="text-button" href="${calendarHref()}">回到本月</a><span class="calendar-month-total">${Number(c.month.slice(0, 4))} 年 ${Number(c.month.slice(5))} 月 · 共 ${c.total} 份练习</span></div><p class="small muted calendar-hint">点击日期查看当天练习；日期下方是发布份数。</p>
+    <table class="month-calendar" aria-label="${c.month} 练习月历"><thead><tr>${['周一', '周二', '周三', '周四', '周五', '周六', '周日'].map(day => `<th scope="col">${day}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table></section>
+    <section class="calendar-daily" aria-labelledby="calendar-daily-title"><div class="section-heading"><h2 id="calendar-daily-title">${esc(c.className)} · ${dayLabel(selected.date)}</h2><div class="actions"><span class="badge">${selected.assignments.length} 份练习</span><button class="text-button" data-action="calendar-grid">返回月历</button></div></div><div class="calendar-papers">${selected.assignments.map(a => `<a class="assignment-card calendar-paper" data-calendar-assignment="${a.id}" href="#/assignment/${a.id}?classId=${c.classId}&calendar=${selected.date}"><div class="card-top"><span class="eyebrow">${assignmentSummary(a)}</span><span class="arrow">↗</span></div><h3>${esc(a.title)}</h3><p class="muted">${date(a.createdAt)} 发布（北京时间）<br><span class="calendar-deadline">${deadline(a)}</span></p><div class="card-stats"><div><strong>${a.submitted}<small> / ${a.total}</small></strong><span>本班已交人数</span></div><div><strong>${a.pending}</strong><span>本班未交人数</span></div><div><strong ${a.average === null ? 'class="calendar-no-average"' : ''}>${a.average === null ? '暂无均分' : a.average}</strong><span>本班平均分</span></div></div><span class="calendar-detail-link">查看成绩明细 →</span></a>`).join('') || '<div class="empty panel"><h3>这一天没有发布练习</h3><p>可点击其他日期，或翻月查看。</p></div>'}</div></section>`;
+}
 function assignmentSummary(a) {
   return `${categoryNames[a.category]} · ${a.questionCount} 题${a.grade ? ` · ${a.grade} 年级 · ${a.difficulty === 'advanced' ? '提高' : '基础'} · ${esc(a.knowledgePointNames.join('、'))}` : ''}${a.timeLimitMinutes ? ` · 个人限时 ${a.timeLimitMinutes} 分钟` : ''}`;
 }
@@ -130,7 +156,7 @@ function fileBase64(file) {
   });
 }
 function reportView(a) {
-  return `<a class="back-link" href="#/">← 返回班级作业</a>${classPicker(a.classes)}${pageTitle('作业成绩', esc(a.title), `${assignmentSummary(a)} · 满分 100 分 · ${date(a.createdAt)} 发布 · ${deadline(a)}`, '<button class="button secondary" data-action="refresh">刷新成绩 ↻</button>')}
+  return `<a class="back-link" href="${state.calendarBack ?? '#/'}">← ${state.calendarBack ? '返回练习月历' : '返回班级作业'}</a>${classPicker(a.classes)}${pageTitle('作业成绩', esc(a.title), `${assignmentSummary(a)} · 满分 100 分 · ${date(a.createdAt)} 发布 · ${deadline(a)}`, '<button class="button secondary" data-action="refresh">刷新成绩 ↻</button>')}
     <div class="report-stats"><div><span>已交人数</span><strong>${a.submitted}<small> / ${a.total} 人</small></strong></div><div><span>未交人数</span><strong>${a.pending}<small> 人</small></strong></div><div><span>班级平均分</span><strong>${a.average ?? '—'}<small>${a.average === null ? ' 暂无提交' : ' 分'}</small></strong></div></div>
     <section class="panel"><div class="section-heading"><h2>每位同学的进度</h2><span class="muted small">平均分仅计算已提交学生</span></div><div class="table-wrap"><table><thead><tr><th scope="col">学生</th><th scope="col">账号</th><th scope="col">作业状态</th><th scope="col">提交时间</th><th scope="col">成绩 / 100</th></tr></thead><tbody>${a.students.map(s => `<tr><td><span class="avatar">${esc(s.name.slice(0, 1))}</span>${esc(s.name)}</td><td class="mono">${esc(s.username)}</td><td>${badge({ ...s, dueAt: a.dueAt, isClosed: a.isClosed })}</td><td>${date(s.submittedAt)}</td><td class="score-cell">${s.score ?? '—'}</td></tr>`).join('') || '<tr><td colspan="5">还没有学生，请前往学生名单创建账号。</td></tr>'}</tbody></table></div></section><details class="panel questions-details"><summary>查看本次题目（${a.questionCount} 题）</summary><div class="question-preview">${a.expressions.map((expression, i) => `<span>${i + 1}.　${esc(expression)} = ?</span>`).join('')}</div></details>`;
 }
@@ -155,7 +181,8 @@ function render() {
   if (!state.user) view = loginView();
   else if (state.loading) view = '<p class="loading">正在打开作业本…</p>';
   else if (state.loadError) view = `<section class="empty panel"><h2>作业本暂时没有打开</h2><p>${esc(state.loadError)}</p><button class="button" data-action="refresh">重新加载</button><p><a href="#/">返回作业列表</a></p></section>`;
-  else if (location.hash === '#/students' && state.user.role === 'teacher') view = studentsView();
+  else if (routePath() === '#/students' && state.user.role === 'teacher') view = studentsView();
+  else if (routePath() === '#/calendar' && state.user.role === 'teacher') view = calendarView(state.calendarData);
   else if (state.assignment) view = state.user.role === 'teacher' ? reportView(state.assignment) : workbook(state.assignment);
   else view = state.user.role === 'teacher' ? teacherHome() : studentHome();
   root.innerHTML = `${header()}${state.user ? `<main class="main">${view}</main>` : view}<footer>小小算术 <span>·</span> 每天进步一点点</footer>`;
@@ -165,22 +192,41 @@ function render() {
 async function load() {
   if (!state.user) { render(); return; }
   const epoch = ++loadEpoch;
-  state.loading = true; state.loadError = ''; state.assignment = null; render();
+  state.loading = true; state.loadError = ''; state.assignment = null; state.calendarData = null; state.calendarBack = null; render();
   try {
+    const path = routePath(), params = new URLSearchParams(location.hash.split('?')[1] ?? '');
     if (state.user.role === 'teacher') {
       const [classes, practiceOptions] = await Promise.all([api('/classes'), api('/practice-options')]);
       if (epoch !== loadEpoch) return;
       state.classes = classes; state.practiceOptions = practiceOptions;
+      if (params.has('classId')) {
+        const id = Number(params.get('classId'));
+        if (!classes.some(c => c.id === id)) throw new Error('请选择有效班级');
+        state.classId = id;
+      }
       if (!classes.some(c => c.id === state.classId)) state.classId = classes[0].id;
     }
-    const match = location.hash.match(/^#\/assignment\/([1-9]\d*)$/);
-    if (match) {
+    const match = path.match(/^#\/assignment\/([1-9]\d*)$/);
+    if (path === '#/calendar' && state.user.role === 'teacher') {
+      const query = new URLSearchParams({ classId: String(state.classId) });
+      if (params.has('month')) query.set('month', params.get('month'));
+      const data = await api(`/calendar?${query}`);
+      if (epoch !== loadEpoch) return;
+      const day = params.get('day');
+      if (day && !data.days.some(d => d.date === day)) throw new Error('所选日期不在当前月份，请重新选择');
+      state.calendarData = data;
+      state.calendarDay = day || (data.today.startsWith(data.month) ? data.today : data.days.find(d => d.assignments.length)?.date || data.days[0].date);
+    } else if (match) {
       let a = await api(`/assignments/${match[1]}`);
+      if (epoch !== loadEpoch) return;
       if (state.user.role === 'teacher') {
+        if (params.has('classId') && !a.classIds.includes(state.classId)) throw new Error('这份作业未发布给该班级');
         if (!a.classIds.includes(state.classId)) state.classId = a.classIds[0];
         a = await api(`/assignments/${match[1]}/report?classId=${state.classId}`);
       }
       if (epoch !== loadEpoch) return; state.assignment = a;
+      const from = params.get('calendar');
+      if (state.user.role === 'teacher' && /^\d{4}-\d{2}-\d{2}$/.test(from ?? '') && Number.isFinite(Date.parse(`${from}T00:00:00Z`)) && new Date(`${from}T00:00:00Z`).toISOString().slice(0, 10) === from) state.calendarBack = calendarHref(from.slice(0, 7), from);
     } else if (state.user.role === 'teacher') {
       const [assignments, students] = await Promise.all([api(`/assignments?classId=${state.classId}`), api(`/students?classId=${state.classId}`)]);
       if (epoch !== loadEpoch) return; state.assignments = assignments; state.students = students;
@@ -208,7 +254,7 @@ root.addEventListener('submit', async event => {
   event.preventDefault();
   const form = event.target;
   if (form.id === 'login-form') await formAction(form, 'login-error', async data => {
-    state.user = await api('/login', 'POST', data); state.dirty = false; state.assignments = []; state.students = []; state.importResult = null; state.studentQuery = ''; state.assignment = null;
+    state.user = await api('/login', 'POST', data); state.dirty = false; state.assignments = []; state.students = []; state.importResult = null; state.studentQuery = ''; state.calendarData = null; state.calendarBack = null; state.assignment = null;
     history.replaceState(null, '', '#/'); await load();
   });
   if (form.id === 'publish-form') await formAction(form, 'publish-error', async data => {
@@ -279,7 +325,16 @@ root.addEventListener('input', event => {
 root.addEventListener('change', async event => {
   if (event.target.name === 'category' || event.target.name === 'grade') syncPracticeFields();
   if (state.busy) return;
-  if (event.target.name === 'currentClass') { state.classId = Number(event.target.value); state.importResult = null; await load(); }
+  if (event.target.name === 'currentClass') {
+    state.classId = Number(event.target.value); state.importResult = null;
+    if (routePath() === '#/calendar' || routePath().startsWith('#/assignment/')) {
+      const params = new URLSearchParams(location.hash.split('?')[1] ?? ''); params.set('classId', String(state.classId));
+      if (routePath() === '#/calendar' && state.calendarData) { params.set('month', state.calendarData.month); params.set('day', state.calendarDay); }
+      history.replaceState(null, '', `${routePath()}?${params}`);
+    }
+    await load();
+  }
+  if (event.target.name === 'calendarMonth' && event.target.value) { history.pushState(null, '', calendarHref(event.target.value)); await load(); }
   if (event.target.dataset.studentClass) {
     state.busy = true;
     try { await api(`/students/${event.target.dataset.studentClass}`, 'PUT', { classId: Number(event.target.value) }); await load(); toast('学生班级已更新'); }
@@ -291,6 +346,10 @@ root.addEventListener('click', async event => {
   const action = event.target.closest('[data-action]')?.dataset.action;
   if (state.busy && (event.target.closest('a') || action)) { event.preventDefault(); return; }
   if (action === 'save') await saveAnswers();
+  if (action === 'calendar-grid') document.querySelector('.calendar-panel')?.scrollIntoView?.({ block: 'start' });
+  if (event.target.closest('.calendar-day')?.getAttribute('href') === location.hash) {
+    event.preventDefault(); document.querySelector('.calendar-daily')?.scrollIntoView?.({ block: 'start' });
+  }
   if (action === 'clear-search') {
     state.studentQuery = ''; document.querySelector('[name="studentSearch"]').value = ''; updateStudentSearch();
   }
@@ -304,7 +363,7 @@ root.addEventListener('click', async event => {
   if (action === 'logout') {
     if (state.dirty && !confirm('还有未保存的答案。确定退出并放弃这些修改吗？')) return;
     state.busy = true;
-    try { await api('/logout', 'POST', {}); loadEpoch++; state.user = null; state.assignment = null; state.assignments = []; state.students = []; state.importResult = null; state.studentQuery = ''; state.dirty = false; history.replaceState(null, '', '#/'); render(); }
+    try { await api('/logout', 'POST', {}); loadEpoch++; state.user = null; state.assignment = null; state.assignments = []; state.students = []; state.importResult = null; state.studentQuery = ''; state.calendarData = null; state.calendarBack = null; state.dirty = false; history.replaceState(null, '', '#/'); render(); }
     catch (e) { toast(e.message, true); }
     finally { state.busy = false; }
   }
@@ -317,7 +376,9 @@ window.addEventListener('hashchange', async () => {
   if (state.busy || (state.dirty && !confirm('还有未保存的答案。确定离开并放弃这些修改吗？'))) {
     reverting = true; location.hash = state.route || '#/'; return;
   }
-  state.dirty = false; await load(); window.scrollTo(0, 0);
+  state.dirty = false; await load();
+  if (routePath() === '#/calendar' && new URLSearchParams(location.hash.split('?')[1] ?? '').has('day')) document.querySelector('.calendar-daily')?.scrollIntoView?.({ block: 'start' });
+  else window.scrollTo(0, 0);
 });
 window.addEventListener('beforeunload', event => { if (state.dirty || state.busy) { event.preventDefault(); event.returnValue = ''; } });
 try { state.user = await api('/me'); } catch (e) { if (!e.message.includes('请先登录')) toast(e.message, true); }

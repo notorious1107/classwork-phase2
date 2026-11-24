@@ -3,6 +3,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { openStore, hashPassword, verifyPassword, publishAssignment, solution, formatExpression, inferCategory, categories, questionCounts } from './store.mjs';
 import { mixedOptions, practiceOptions } from './questions.mjs';
 import { parseRoster, importRoster, rosterMaxBytes } from './roster.mjs';
+import { calendarMonth, beijingDateKey } from './calendar.mjs';
 
 class HttpError extends Error {
   constructor(status, message) { super(message); this.status = status; }
@@ -181,6 +182,28 @@ export async function createApp({ dbPath = 'data/classwork.sqlite', teacherPassw
       if (!user) fail(401, '请先登录');
       if (path === '/api/me' && req.method === 'GET') return send(200, safeUser(user));
       if (path === '/api/practice-options' && req.method === 'GET') { requireRole(user, 'teacher'); return send(200, practiceOptions); }
+      if (path === '/api/calendar' && req.method === 'GET') {
+        requireRole(user, 'teacher');
+        const classId = classFilter(url);
+        if (classId === null) fail(400, '请先选择班级');
+        const today = beijingDateKey(new Date(clock()).toISOString());
+        const month = url.searchParams.has('month') ? url.searchParams.get('month') : today.slice(0, 7);
+        const { start, days } = calendarMonth(month);
+        const grouped = new Map(days.map(date => [date, { date, assignments: [] }]));
+        const rows = db.prepare(`SELECT a.* FROM assignments a JOIN assignment_classes ac ON ac.assignment_id=a.id
+          WHERE ac.class_id=? AND julianday(a.created_at)>=julianday(?) AND julianday(a.created_at)<julianday(?)+?
+          ORDER BY julianday(a.created_at) DESC,a.id DESC`).all(classId, start, start, days.length);
+        for (const row of rows) {
+          const a = withClasses(row), summary = report(a, classId);
+          grouped.get(beijingDateKey(a.createdAt)).assignments.push({
+            id: a.id, title: a.title, createdAt: a.createdAt, dueAt: a.dueAt,
+            category: a.category, questionCount: a.questionCount,
+            submitted: summary.submitted, pending: summary.pending, total: summary.total, average: summary.average
+          });
+        }
+        return send(200, { classId, className: db.prepare('SELECT name FROM classes WHERE id=?').get(classId).name,
+          month, today, timeZone: 'Asia/Shanghai', total: rows.length, days: [...grouped.values()] });
+      }
       if (path === '/api/classes') {
         requireRole(user, 'teacher');
         if (req.method === 'GET') return send(200, db.prepare('SELECT id,name FROM classes ORDER BY id').all());

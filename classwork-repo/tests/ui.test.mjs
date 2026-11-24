@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { JSDOM } from 'jsdom';
 import { createApp } from '../backend/app.mjs';
 import { createWebServer } from '../frontend/server.mjs';
-import { solution } from '../backend/store.mjs';
+import { solution, publishAssignment } from '../backend/store.mjs';
 import { createHistoryClass, historyAssignments, studentPassword, teacherPassword } from './history-fixture.mjs';
 
 const html = await readFile(new URL('../frontend/index.html', import.meta.url), 'utf8');
@@ -264,6 +264,119 @@ test('北京时间发布、页面到点保留答案、逾期存草稿和已交�
   }, undefined, { clock: () => currentTime });
 });
 
+function seedCalendar(app) {
+  const db = app.db;
+  db.prepare("INSERT INTO classes(name) VALUES('二班')").run();
+  for (const [username, name, classId] of [['lin', '小林', 1], ['pending', '未交同学', 1], ['zhou', '小周', 2]]) db.prepare("INSERT INTO users(username,name,password_hash,role,class_id) SELECT ?,?,password_hash,'student',? FROM users WHERE role='teacher'").run(username, name, classId);
+  const make = (title, createdAt, classIds = [1], dueAt = null) => {
+    const id = publishAssignment(db, title, { classIds, dueAt }); db.prepare('UPDATE assignments SET created_at=? WHERE id=?').run(createdAt, id); return id;
+  };
+  const shared = make('周二同卷 <b>，周四截止', '2026-11-23T16:30:00Z', [1, 2], '2026-11-26T12:00:00Z');
+  const pending = make('周二第二份', '2026-11-24T05:00:00Z');
+  const other = make('二班专属', '2026-11-24T08:00:00Z', [2]);
+  const december = make('十二月第一份', '2026-11-30T16:00:00Z', [1, 2]);
+  make('闰日练习', '2024-02-28T16:00:00Z');
+  const questions = JSON.parse(db.prepare('SELECT questions FROM assignments WHERE id=?').get(shared).questions);
+  for (const [username, score] of [['lin', 90], ['zhou', 100]]) {
+    const answers = questions.map((q, i) => score === 90 && i === 0 ? (solution(q) + 1) % 21 : solution(q));
+    const student = db.prepare('SELECT id FROM users WHERE username=?').get(username);
+    db.prepare('INSERT INTO submissions(assignment_id,student_id,answers,saved_at,submitted_at,score) VALUES(?,?,?,?,?,?)')
+      .run(shared, student.id, JSON.stringify(answers), '2026-11-24T06:00:00Z', '2026-11-24T06:00:00Z', score);
+  }
+  return { shared, pending, other, december };
+}
+
+test('教师月历翻月、日期归类、分班统计与成绩往返保留班级日期', async () => {
+  await withPages(async ({ app, page, login }) => {
+    const ids = seedCalendar(app), teacher = await page(); await login(teacher, 'teacher', 'Teacher123!');
+    teacher.click('nav a[href="#/calendar"]');
+    await waitFor(() => teacher.d.querySelector('.month-calendar'), '练习月历');
+    assert.equal(teacher.d.querySelector('[name="calendarMonth"]').value, '2026-11');
+    assert.equal(teacher.d.querySelectorAll('.calendar-day').length, 30);
+    assert.equal(teacher.d.querySelector('nav a[href="#/calendar"]').getAttribute('aria-current'), 'page');
+    const card = id => teacher.d.querySelector(`[data-calendar-assignment="${id}"]`);
+    const scores = id => [...card(id).querySelectorAll('.card-stats strong')].map(n => n.firstChild.textContent);
+    assert.equal(teacher.d.querySelectorAll('.calendar-paper').length, 2);
+    assert.deepEqual(scores(ids.shared), ['1', '1', '90']);
+    assert.ok(card(ids.shared).textContent.includes('2026/11/24 00:30'));
+    assert.ok(card(ids.shared).textContent.includes('截止：2026/11/26 20:00'));
+    assert.equal(card(ids.shared).querySelector('h3 b'), null);
+    assert.equal(card(ids.pending).querySelector('.calendar-no-average').textContent, '暂无均分');
+    teacher.click('.calendar-day[href*="day=2026-11-26"]');
+    await waitFor(() => teacher.d.querySelector('.calendar-day[aria-current="date"] time')?.getAttribute('datetime') === '2026-11-26', '截止日期不代替发布日期');
+    assert.equal(teacher.d.querySelectorAll('.calendar-paper').length, 0);
+    assert.ok(teacher.d.querySelector('.calendar-daily').textContent.includes('这一天没有发布练习'));
+    teacher.click('.calendar-day[href*="day=2026-11-24"]');
+    await waitFor(() => card(ids.shared), '回到周二');
+    teacher.click(`[data-calendar-assignment="${ids.shared}"]`);
+    await waitFor(() => teacher.d.querySelector('.report-stats'), '进入现有成绩明细');
+    assert.ok(teacher.w.location.hash.includes('classId=1')); assert.ok(teacher.w.location.hash.includes('calendar=2026-11-24'));
+    assert.ok(teacher.d.querySelector('tbody').textContent.includes('小林')); assert.ok(!teacher.d.querySelector('tbody').textContent.includes('小周'));
+    assert.equal(teacher.d.querySelector('.back-link').textContent, '← 返回练习月历');
+    teacher.click('.back-link'); await waitFor(() => teacher.d.querySelector('.month-calendar'), '从明细返回月历');
+    assert.equal(teacher.d.querySelector('.calendar-day[aria-current="date"] time').getAttribute('datetime'), '2026-11-24');
+    const classSelect = teacher.d.querySelector('[name="currentClass"]'); classSelect.value = '2'; classSelect.dispatchEvent(new teacher.w.Event('change', { bubbles: true }));
+    await waitFor(() => teacher.d.querySelector('#calendar-daily-title')?.textContent.startsWith('二班'), '月历切二班');
+    assert.deepEqual(scores(ids.shared), ['1', '0', '100']); assert.equal(card(ids.pending), null); assert.ok(card(ids.other));
+    const session = teacher.session, hash = teacher.w.location.hash;
+    const refreshed = await page(session, hash);
+    assert.equal(refreshed.d.querySelector('[name="currentClass"]').value, '2');
+    assert.equal(refreshed.d.querySelector(`[data-calendar-assignment="${ids.shared}"] .card-stats div:last-child strong`).textContent, '100');
+    refreshed.w.close();
+    teacher.click('[aria-label="下个月"]');
+    await waitFor(() => teacher.d.querySelector('.month-calendar')?.getAttribute('aria-label') === '2026-12 练习月历', '翻到十二月');
+    assert.equal(teacher.d.querySelectorAll('.calendar-day').length, 31); assert.ok(card(ids.december));
+    teacher.click('[aria-label="下个月"]');
+    await waitFor(() => teacher.d.querySelector('.month-calendar')?.getAttribute('aria-label') === '2027-01 练习月历', '跨年翻月');
+    teacher.click('[aria-label="上个月"]');
+    await waitFor(() => teacher.d.querySelector('.month-calendar')?.getAttribute('aria-label') === '2026-12 练习月历', '上一月');
+    teacher.fill('calendarMonth', '2024-02'); teacher.d.querySelector('[name="calendarMonth"]').dispatchEvent(new teacher.w.Event('change', { bubbles: true }));
+    await waitFor(() => teacher.d.querySelector('.month-calendar')?.getAttribute('aria-label') === '2024-02 练习月历', '直接选闰年月份');
+    assert.equal(teacher.d.querySelectorAll('.calendar-day').length, 29);
+    assert.ok(teacher.d.querySelector('.calendar-month-total').textContent.includes('共 0 份练习'));
+    teacher.click('.calendar-toolbar .text-button');
+    await waitFor(() => teacher.d.querySelector('.month-calendar')?.getAttribute('aria-label') === '2026-11 练习月历', '回到北京时间本月');
+    teacher.click(`[data-calendar-assignment="${ids.shared}"]`); await waitFor(() => teacher.d.querySelector('.report-stats'), '二班进入成绩');
+    const detail = await page(session, teacher.w.location.hash);
+    assert.equal(detail.d.querySelector('[name="currentClass"]').value, '2');
+    assert.ok(detail.d.querySelector('tbody').textContent.includes('小周')); assert.ok(!detail.d.querySelector('tbody').textContent.includes('小林'));
+    detail.click('.back-link'); await waitFor(() => detail.d.querySelector('#calendar-daily-title')?.textContent.startsWith('二班'), '明细刷新后返回原班日期');
+  }, undefined, { clock: () => Date.parse('2026-11-24T08:00:00Z') });
+});
+
+test('月历断网重试、错误月份和日期、延迟响应不会串班', async () => {
+  await withPages(async ({ app, page, login }) => {
+    const ids = seedCalendar(app), teacher = await page(); await login(teacher, 'teacher', 'Teacher123!');
+    const route = id => `#/calendar?classId=${id}&month=2026-11&day=2026-11-24`;
+    teacher.w.location.hash = route(1); await waitFor(() => teacher.d.querySelector('.month-calendar'), '打开固定日期');
+    teacher.session.failPath = '/calendar?'; teacher.click('[data-action="refresh"]');
+    await waitFor(() => teacher.d.querySelector('.empty h2')?.textContent.includes('暂时没有打开'), '月历断网错误');
+    assert.equal(teacher.d.querySelector('.calendar-paper'), null);
+    teacher.session.failPath = ''; teacher.click('[data-action="refresh"]');
+    await waitFor(() => teacher.d.querySelector('.month-calendar'), '重试月历');
+    teacher.w.location.hash = '#/calendar?classId=1&month=2026-13';
+    await waitFor(() => teacher.d.querySelector('.empty p')?.textContent.includes('YYYY-MM'), '月份校验');
+    teacher.w.location.hash = '#/calendar?classId=1&month=2024-02&day=2024-02-30';
+    await waitFor(() => teacher.d.querySelector('.empty p')?.textContent.includes('日期不在当前月份'), '日期校验');
+    teacher.w.location.hash = route(2); await waitFor(() => teacher.d.querySelector('#calendar-daily-title')?.textContent.startsWith('二班'), '进入二班');
+    let release, received, parsed;
+    const gate = new Promise(resolve => { release = resolve; }), started = new Promise(resolve => { received = resolve; }), completed = new Promise(resolve => { parsed = resolve; });
+    const original = teacher.w.fetch;
+    teacher.w.fetch = async (path, options) => {
+      const response = await original(path, options);
+      if (!String(path).includes('/calendar?classId=1&')) return response;
+      received(); await gate;
+      return { ok: response.ok, status: response.status, json: async () => { const value = await response.json(); parsed(); return value; } };
+    };
+    teacher.w.location.hash = route(1); await started;
+    teacher.w.location.hash = route(2); await waitFor(() => teacher.d.querySelector('#calendar-daily-title')?.textContent.startsWith('二班'), '等待新班级响应');
+    release(); await completed; await new Promise(resolve => setImmediate(resolve));
+    assert.equal(teacher.d.querySelector('[name="currentClass"]').value, '2');
+    assert.equal(teacher.d.querySelector(`[data-calendar-assignment="${ids.shared}"] .card-stats div:last-child strong`).textContent, '100');
+    assert.equal(teacher.d.querySelector(`[data-calendar-assignment="${ids.pending}"]`), null);
+  }, undefined, { clock: () => Date.parse('2026-11-24T08:00:00Z') });
+});
+
 test('名单文件上传、逐行反馈、刷新名单与前导零账号登录', async () => {
   await withPages(async ({ app, base, page, login }) => {
     app.db.prepare("INSERT INTO classes(name) VALUES('二班')").run();
@@ -347,7 +460,7 @@ test('班级页面建班分配学生、同卷发布和切班成绩互不混入',
       await waitFor(() => teacher.d.querySelector('[name="currentClass"]')?.value === String(id) && !teacher.d.querySelector('.loading'), '切换班级');
     };
     teacher.fill('renameClassName', '一班'); teacher.submit('rename-class-form');
-    await waitFor(() => teacher.d.querySelector('[name="currentClass"]').textContent.includes('一班'), '原班级改名');
+    await waitFor(() => teacher.d.querySelector('[name="currentClass"]')?.textContent.includes('一班'), '原班级改名');
     teacher.fill('className', '二班'); teacher.submit('class-form');
     await waitFor(() => teacher.d.querySelector('[name="currentClass"]')?.value === '2', '创建二班');
     const createStudent = async (username, name) => {

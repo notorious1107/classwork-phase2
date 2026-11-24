@@ -19,3 +19,54 @@ select{font:inherit;display:block;width:100%;border:1px solid #cbd6e8;border-rad
 .roster-import{margin-bottom:24px}.roster-import form{display:flex;align-items:end;flex-wrap:wrap;gap:16px}.roster-import label{margin:0;flex:1;min-width:180px}.roster-import .import-reason{white-space:normal;min-width:230px;line-height:1.8}.roster-import #import-result{margin-top:20px}.roster-import .text-button{color:var(--blue);font-size:13px}.roster-import input[type=file]{padding:10px}.roster-import .form-error{width:100%}
 
 .roster-search{display:flex;align-items:end;gap:12px;margin-bottom:20px}.roster-search label{flex:1;margin:0;font-size:13px}.roster-search .button{padding:12px 14px}@media(max-width:420px){.roster-search{flex-wrap:wrap}.roster-search label{flex-basis:100%}}
+
+.calendar-panel{border-top:4px solid var(--yellow);padding:24px;scroll-margin-top:20px}
+.calendar-toolbar{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+.calendar-month-control{display:flex;align-items:center;gap:10px}
+.calendar-month-control input{margin:0;width:168px;padding:10px;font-size:16px;font-weight:600;min-height:46px}
+.calendar-month-control .button{padding:10px 14px;font-size:13px}
+.calendar-month-total{margin-left:auto;color:var(--muted);font-size:13px}
+.calendar-toolbar .text-button{font-size:13px;color:var(--blue)}
+.calendar-hint{margin:16px 0!important;font-size:12px!important}
+.month-calendar{table-layout:fixed;width:100%;white-space:normal;border:1px solid var(--line)}
+.month-calendar th{text-align:center;padding:12px 0;font-size:12px;border:1px solid var(--line);background:#f3f6fc}
+.month-calendar td{padding:0;vertical-align:top;font-weight:400;border:1px solid var(--line)}
+.month-calendar .calendar-blank{background:#f7f9fd}
+.calendar-day{height:140px;display:flex;flex-direction:column;gap:7px;padding:10px;border:2px solid transparent;border-radius:4px;min-width:0}
+.calendar-day:hover{background:#eef3ff;border-color:#b5c9fa}
+.calendar-day.selected{background:var(--blue);border-color:var(--blue);color:white}
+.calendar-day-top{display:flex;align-items:center;justify-content:space-between;gap:2px}
+.calendar-day time{font:600 23px/1.1 "Cascadia Code",Consolas,monospace}
+.calendar-today{border-radius:4px;background:var(--yellow);color:var(--ink);font-size:10px;padding:2px 4px}
+.calendar-day-count{font-size:11px;color:var(--muted)}
+.calendar-day.selected .calendar-day-count{color:#e5edff}
+.calendar-titles{display:grid;gap:4px;font-size:11px;line-height:1.4;overflow:hidden}
+.calendar-titles>span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.calendar-day:focus-visible{position:relative;z-index:1;outline-offset:-3px}
+.calendar-daily{margin-top:32px;scroll-margin-top:24px}
+.calendar-daily>.section-heading{align-items:center;flex-wrap:wrap}
+.calendar-daily>.section-heading .text-button{color:var(--blue);font-size:12px}
+.calendar-papers{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px}
+.calendar-papers>.empty{grid-column:1/-1}
+.calendar-paper .card-top .eyebrow{line-height:1.6}
+.calendar-paper .calendar-no-average{font-size:17px;line-height:35px}
+.calendar-deadline{color:#866016}
+.calendar-detail-link{display:block;margin-top:20px;color:var(--blue);font-size:12px;text-align:right}
+@media(max-width:700px){
+  .calendar-panel{padding:14px}
+  .calendar-toolbar{gap:12px}
+  .calendar-month-control{gap:8px;max-width:100%}
+  .calendar-month-control input{width:148px;font-size:14px;min-height:42px;padding:8px}
+  .calendar-month-control .button{padding:10px 7px;min-height:42px;font-size:12px}
+  .calendar-month-total{font-size:12px;margin-left:0}
+  .month-calendar th{font-size:10px;padding:10px 0}
+  .calendar-day{height:76px;padding:6px 3px;gap:8px}
+  .calendar-day time{font-size:17px}
+  .calendar-day-count{font-size:10px}
+  .calendar-titles{display:none}
+  .calendar-today{font-size:9px;padding:1px 2px}
+  .calendar-papers{grid-template-columns:1fr}
+  .calendar-paper .card-stats>div+div{padding-left:12px}
+  .calendar-paper .card-stats span{font-size:11px}
+  .calendar-daily>.section-heading h2{font-size:17px;line-height:1.6}
+}
