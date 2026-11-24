@@ -1,4 +1,4 @@
-import { solution, formatExpression, inferCategory } from './store.mjs';
+import { solution, formatExpression, questionCategoriesFor } from './store.mjs';
 
 const fail = (status, message) => { throw Object.assign(new Error(message), { status }); };
 const opInfo = op => {
@@ -43,7 +43,7 @@ export function mistakeSource(db, studentId, assignmentId, questionNumber) {
   if (!row) fail(404, '错题不存在');
   const questions = JSON.parse(row.questions), answers = JSON.parse(row.answers), index = questionNumber - 1;
   if (!Number.isSafeInteger(questionNumber) || index < 0 || index >= questions.length || answers[index] === solution(questions[index])) fail(404, '错题不存在');
-  return { row, question: questions[index], originalAnswer: answers[index], category: row.category ?? inferCategory(questions) };
+  return { row, question: questions[index], originalAnswer: answers[index], category: questionCategoriesFor(row, questions)[index] };
 }
 export function correctionHistory(db, studentId, assignmentId, questionNumber) {
   return db.prepare(`SELECT attempt_number,answer,correct,created_at FROM correction_attempts

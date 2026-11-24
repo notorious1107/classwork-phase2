@@ -9,6 +9,7 @@ import { createWebServer } from '../frontend/server.mjs';
 import { solution, publishAssignment } from '../backend/store.mjs';
 import { createHistoryClass, historyAssignments, studentPassword, teacherPassword } from './history-fixture.mjs';
 import { seedCorrections } from './correction-fixture.mjs';
+import { legacyPreviewClass, legacyPreviewSchemas } from './preview-fixture.mjs';
 
 const html = await readFile(new URL('../frontend/index.html', import.meta.url), 'utf8');
 const source = await readFile(new URL('../frontend/app.mjs', import.meta.url), 'utf8');
@@ -51,6 +52,12 @@ async function withPages(run, seed, options = {}) {
     return { w, d: w.document, session,
       fill(name, value) { const input = w.document.querySelector(`[name="${name}"]`); assert.ok(input, name); input.value = String(value); input.dispatchEvent(new w.Event('input', { bubbles: true })); },
       submit(id) { w.document.getElementById(id).dispatchEvent(new w.Event('submit', { bubbles: true, cancelable: true })); },
+      async publish() {
+        w.document.getElementById('publish-form').dispatchEvent(new w.Event('submit', { bubbles: true, cancelable: true }));
+        await waitFor(() => w.document.querySelector('#assignment-preview [data-action="confirm-preview"]:not(:disabled)'), '生成预览');
+        w.document.querySelector('[data-action="confirm-preview"]').click();
+        await waitFor(() => w.document.querySelector('.report-stats'), '确认发布');
+      },
       click(selector) { const node = w.document.querySelector(selector); assert.ok(node, selector); node.click(); },
       async route(hash) { w.location.hash = hash; await waitFor(() => !w.document.querySelector('.loading'), '切换页面'); }
     };
@@ -96,7 +103,7 @@ test('页面表单经独立前端代理完成师生全流程（DOM 环境，无�
       await waitFor(() => teacher.d.querySelector('#student-error').textContent.includes('已存在'), '重名错误');
       teacher.click('nav a[href="#/"]');
       await waitFor(() => teacher.d.querySelector('#publish-form'), '作业页');
-      teacher.fill('title', '周三练习 <script>'); teacher.submit('publish-form');
+      teacher.fill('title', '周三练习 <script>'); await teacher.publish();
       await waitFor(() => teacher.d.querySelector('.report-stats'), '发布作业');
       assert.equal(teacher.d.querySelector('h1').textContent, '周三练习 <script>');
       assert.equal(teacher.d.querySelectorAll('tbody tr').length, 2);
@@ -167,11 +174,11 @@ test('页面表单经独立前端代理完成师生全流程（DOM 环境，无�
 test('发布自选题型和题量，20 题续做草稿后答对 19 题显示 95 分', async () => {
   await withPages(async ({ app, page, login }) => {
     const teacher = await page(); await login(teacher, 'teacher', 'Teacher123!');
-    assert.deepEqual([...teacher.d.querySelector('[name="category"]').options].map(o => o.value), ['add-sub-20', 'mul-div-20', 'mixed-100']);
+    assert.deepEqual([...teacher.d.querySelector('[name="category"]').options].map(o => o.value), ['add-sub-20', 'mul-div-20', 'mixed-100', 'composite']);
     assert.deepEqual([...teacher.d.querySelector('[name="questionCount"]').options].map(o => o.value), ['10', '20', '50']);
     app.db.prepare("INSERT INTO users(username,name,password_hash,role) SELECT 'pupil','学生',password_hash,'student' FROM users WHERE role='teacher'").run();
     for (const [category, count] of [['mul-div-20', 20], ['mixed-100', 50]]) {
-      teacher.fill('title', '自选练习'); teacher.fill('category', category); teacher.fill('questionCount', count); teacher.submit('publish-form');
+      teacher.fill('title', '自选练习'); teacher.fill('category', category); teacher.fill('questionCount', count); await teacher.publish();
       await waitFor(() => teacher.d.querySelector('.report-stats'), '发布自选练习');
       assert.ok(teacher.d.querySelector('summary').textContent.includes(`${count} 题`));
       assert.equal(teacher.d.querySelectorAll('.question-preview span').length, count);
@@ -213,7 +220,7 @@ test('北京时间发布、页面到点保留答案、逾期存草稿和已交�
     teacher.fill('title', '明晚八点前交'); teacher.fill('questionCount', 20);
     teacher.fill('dueAt', '2026-11-23T20:00'); teacher.submit('publish-form');
     await waitFor(() => teacher.d.querySelector('#publish-error').textContent.includes('晚于当前时间'), '拒绝过去截止时间');
-    teacher.fill('dueAt', '2026-11-24T20:00'); teacher.submit('publish-form');
+    teacher.fill('dueAt', '2026-11-24T20:00'); await teacher.publish();
     await waitFor(() => teacher.d.querySelector('.report-stats'), '发布带截止时间作业');
     assert.ok(teacher.d.querySelector('.page-title p').textContent.includes('20:00（北京时间）'));
     const id = Number(teacher.w.location.hash.split('/').at(-1));
@@ -263,6 +270,103 @@ test('北京时间发布、页面到点保留答案、逾期存草稿和已交�
     assert.ok(resumed.d.querySelector('.badge').textContent.includes('已截止'));
     assert.ok(resumed.d.querySelector('.page-title p').textContent.includes('已截止未交'));
   }, undefined, { clock: () => currentTime });
+});
+
+test('教师整卷预览、换卷、修改重看与综合练习最后题序一致，学生一卷草稿和95分', async () => {
+  await withPages(async ({ app, page, login }) => {
+    app.db.prepare("INSERT INTO classes(name) VALUES('二班')").run();
+    for (const [username, classId] of [['pupil', 1], ['zhou', 2]]) app.db.prepare("INSERT INTO users(username,name,password_hash,role,class_id) SELECT ?,?,password_hash,'student',? FROM users WHERE role='teacher'").run(username, username, classId);
+    const teacher = await page(); await login(teacher, 'teacher', 'Teacher123!');
+    const pupil = await page(); await login(pupil, 'pupil', 'Teacher123!');
+    teacher.fill('title', '三类综合 <b>'); teacher.fill('category', 'composite'); teacher.fill('questionCount', 20); teacher.fill('difficulty', 'advanced');
+    assert.equal(teacher.d.querySelector('#composite-fields').hidden, false); assert.equal(teacher.d.querySelector('#practice-fields').hidden, false);
+    teacher.d.querySelector('[name="classIds"][value="2"]').checked = true;
+    teacher.submit('publish-form'); await waitFor(() => teacher.d.querySelector('#assignment-preview'), '先预览未发布');
+    assert.equal(teacher.d.querySelectorAll('.preview-questions li').length, 20); assert.equal(teacher.d.querySelector('#preview-title b'), null);
+    assert.deepEqual([...teacher.d.querySelectorAll('[data-preview-category]')].map(el => el.textContent.match(/\d+ 题$/)[0]), ['7 题', '7 题', '6 题']);
+    assert.equal(app.db.prepare('SELECT COUNT(*) AS n FROM assignments').get().n, 0);
+    pupil.click('[data-action="refresh"]'); await waitFor(() => pupil.d.querySelector('.student-grid .empty'), '学生仍看不到预览');
+    const firstId = teacher.d.querySelector('#assignment-preview').dataset.previewId;
+    const firstQuestions = JSON.parse(app.db.prepare('SELECT questions FROM assignment_previews').get().questions);
+    teacher.click('[data-action="replace-preview"]'); await waitFor(() => teacher.d.querySelector('#assignment-preview')?.dataset.previewId !== firstId, '换一套');
+    assert.notDeepEqual(JSON.parse(app.db.prepare('SELECT questions FROM assignment_previews').get().questions), firstQuestions);
+    teacher.fill('questionCount', 50);
+    assert.equal(teacher.d.querySelector('[data-action="confirm-preview"]').disabled, true); assert.equal(teacher.d.querySelector('#preview-stale').hidden, false);
+    assert.equal(teacher.d.querySelectorAll('.preview-questions li').length, 20);
+    teacher.submit('publish-form'); await waitFor(() => teacher.d.querySelectorAll('.preview-questions li').length === 50, '修改设置再预览');
+    assert.deepEqual([...teacher.d.querySelectorAll('[data-preview-category]')].map(el => el.textContent.match(/\d+ 题$/)[0]), ['17 题', '17 题', '16 题']);
+    teacher.fill('questionCount', 20); teacher.fill('difficulty', 'basic'); teacher.submit('publish-form');
+    await waitFor(() => teacher.d.querySelectorAll('.preview-questions li').length === 20 && !teacher.d.querySelector('[data-action="confirm-preview"]').disabled, '最后的基础20题预览');
+    assert.ok(teacher.d.querySelector('.preview-difficulty').textContent.includes('不进位'));
+    const finalQuestions = JSON.parse(app.db.prepare('SELECT questions FROM assignment_previews').get().questions);
+    const finalExpressions = [...teacher.d.querySelectorAll('.preview-questions li')].map(el => el.children[1].textContent.replace(' ＝ ?', ''));
+    teacher.click('[data-action="confirm-preview"]'); await waitFor(() => teacher.d.querySelector('.report-stats'), '确认发布');
+    const id = Number(teacher.w.location.hash.split('/').at(-1));
+    assert.deepEqual(JSON.parse(app.db.prepare('SELECT questions FROM assignments WHERE id=?').get(id).questions), finalQuestions);
+    assert.deepEqual([...teacher.d.querySelectorAll('.question-preview span')].map(el => el.textContent.replace(/^\d+\.　/, '').replace(' = ?', '')), finalExpressions);
+    pupil.click('[data-action="refresh"]'); await waitFor(() => pupil.d.querySelector('.student-card'), '发布后学生可见');
+    pupil.click('.student-card'); await waitFor(() => pupil.d.querySelectorAll('.equation input').length === 20, '学生同一张综合卷');
+    assert.equal(pupil.d.querySelector('#answer-0').max, '20'); assert.equal(pupil.d.querySelector('#answer-14').max, '100');
+    finalQuestions.slice(0, 12).forEach((q, i) => pupil.fill(`answer-${i}`, solution(q))); pupil.click('[data-action="save"]');
+    await waitFor(() => pupil.d.querySelector('#save-state')?.textContent.includes('草稿保存于'), '综合卷12题草稿');
+    const resumed = await page(pupil.session, `#/assignment/${id}`); assert.equal(resumed.d.querySelector('#answer-11').value, String(solution(finalQuestions[11])));
+    finalQuestions.forEach((q, i) => resumed.fill(`answer-${i}`, i === 19 ? (solution(q) + 1) % 101 : solution(q)));
+    resumed.submit('answer-form'); resumed.click('#confirm-submit'); await waitFor(() => resumed.d.querySelector('.score-stamp'), '综合卷批改');
+    assert.equal(resumed.d.querySelector('.score-stamp strong').textContent, '95');
+  });
+});
+
+test('刷新恢复未发布预览，确认断网和回包丢失可重试，其他窗口换卷后旧预览停发', async () => {
+  await withPages(async ({ app, page, login }) => {
+    const teacher = await page(); await login(teacher, 'teacher', 'Teacher123!');
+    teacher.fill('title', '口诀提高卷'); teacher.fill('category', 'mul-div-20'); teacher.fill('difficulty', 'advanced'); teacher.fill('questionCount', 50);
+    teacher.submit('publish-form'); await waitFor(() => teacher.d.querySelector('#assignment-preview'), '口诀预览');
+    assert.ok(teacher.d.querySelector('.preview-difficulty').textContent.includes('排除乘 0/1'));
+    const previewId = teacher.d.querySelector('#assignment-preview').dataset.previewId;
+    const refreshed = await page(teacher.session);
+    assert.equal(refreshed.d.querySelector('#assignment-preview').dataset.previewId, previewId);
+    assert.equal(refreshed.d.querySelector('[name="difficulty"]').value, 'advanced'); assert.equal(refreshed.d.querySelector('[name="questionCount"]').value, '50');
+    refreshed.session.failPath = `/assignment-previews/${previewId}/publish`; refreshed.click('[data-action="confirm-preview"]');
+    await waitFor(() => refreshed.d.querySelector('#preview-error')?.textContent.includes('连接失败'), '确认离线');
+    assert.equal(app.db.prepare('SELECT COUNT(*) AS n FROM assignments').get().n, 0);
+    refreshed.session.failPath = ''; let lost = true; const original = refreshed.w.fetch;
+    refreshed.w.fetch = async (path, options) => { const response = await original(path, options); if (lost && String(path).endsWith('/publish')) { lost = false; throw new Error('丢失回包'); } return response; };
+    refreshed.click('[data-action="confirm-preview"]'); await waitFor(() => !lost && refreshed.d.querySelector('#preview-error')?.textContent.includes('连接失败'), '发布已保存但回包丢失');
+    assert.equal(app.db.prepare('SELECT COUNT(*) AS n FROM assignments').get().n, 1);
+    refreshed.click('[data-action="confirm-preview"]'); await waitFor(() => refreshed.d.querySelector('.report-stats'), '重试确认回原作业');
+    assert.equal(app.db.prepare('SELECT COUNT(*) AS n FROM assignments').get().n, 1);
+    refreshed.click('.back-link'); await waitFor(() => refreshed.d.querySelector('#publish-form'), '再次准备预览');
+    refreshed.fill('title', '第二次预览'); refreshed.submit('publish-form'); await waitFor(() => refreshed.d.querySelector('#assignment-preview'), '新预览');
+    const oldId = refreshed.d.querySelector('#assignment-preview').dataset.previewId;
+    const otherWindow = await page(refreshed.session); otherWindow.click('[data-action="replace-preview"]');
+    await waitFor(() => otherWindow.d.querySelector('#assignment-preview')?.dataset.previewId !== oldId, '另一个窗口换卷');
+    refreshed.click('[data-action="confirm-preview"]'); await waitFor(() => refreshed.d.querySelector('#preview-error')?.textContent.includes('预览已更新'), '旧窗口拒绝发布');
+    assert.equal(refreshed.d.querySelector('[data-action="confirm-preview"]').disabled, true);
+    assert.equal(app.db.prepare('SELECT COUNT(*) AS n FROM assignments').get().n, 1);
+    teacher.w.close(); otherWindow.w.close();
+  });
+});
+
+test('旧预览表页面继续确认旧题、换卷及发布综合卷，原作业草稿成绩原样保留', async () => {
+  await withPages(async ({ app, page, login }) => {
+    const originals = app.db.prepare('SELECT * FROM submissions ORDER BY assignment_id,student_id').all();
+    const oldQuestions = JSON.parse(app.db.prepare('SELECT questions FROM assignments WHERE id=33').get().questions);
+    const teacher = await page(); await login(teacher, 'teacher', teacherPassword);
+    assert.equal(teacher.d.querySelector('#assignment-preview').dataset.previewId, 'legacy-preview-1');
+    assert.ok(teacher.d.querySelector('.preview-difficulty').textContent.includes('沿用历史预览原题'));
+    assert.equal(teacher.d.querySelectorAll('.preview-questions li').length, 10);
+    teacher.click('[data-action="confirm-preview"]'); await waitFor(() => teacher.d.querySelector('.report-stats'), '老班级继续确认预览');
+    const firstId = Number(teacher.w.location.hash.split('/').at(-1)); assert.deepEqual(JSON.parse(app.db.prepare('SELECT questions FROM assignments WHERE id=?').get(firstId).questions), oldQuestions);
+    teacher.click('.back-link'); await waitFor(() => teacher.d.querySelector('#publish-form'), '返回设置');
+    teacher.fill('title', '老班级综合练习'); teacher.fill('category', 'composite'); teacher.fill('questionCount', 20); teacher.submit('publish-form');
+    await waitFor(() => teacher.d.querySelectorAll('.preview-questions li').length === 20, '旧表存新预览');
+    const initial = teacher.d.querySelector('#assignment-preview').dataset.previewId;
+    teacher.click('[data-action="replace-preview"]'); await waitFor(() => teacher.d.querySelector('#assignment-preview')?.dataset.previewId !== initial, '旧表换卷');
+    teacher.click('[data-action="confirm-preview"]'); await waitFor(() => teacher.d.querySelector('.report-stats'), '旧表发布新综合卷');
+    assert.deepEqual(app.db.prepare('SELECT * FROM submissions ORDER BY assignment_id,student_id').all(), originals);
+    teacher.w.location.hash = '#/assignment/22?classId=1'; await waitFor(() => teacher.d.querySelector('h1')?.textContent === '练习乙' && teacher.d.querySelector('.report-stats'), '原已发布卷照常查看');
+    assert.ok(teacher.d.querySelector('tbody').textContent.includes('90'));
+  }, path => legacyPreviewClass(path, legacyPreviewSchemas[1]));
 });
 
 test('学生错题本跨作业归集，独立订正先隐答案、逐步反馈、重复练习并回看原卷', async () => {
@@ -679,9 +783,9 @@ test('班级页面建班分配学生、同卷发布和切班成绩互不混入',
     };
     await createStudent('zhou', '小周'); await changeClass(1); await createStudent('lin', '小林');
     teacher.click('nav a[href="#/"]'); await waitFor(() => teacher.d.querySelector('#publish-form'), '回发布页');
-    teacher.fill('title', '只发一班'); teacher.submit('publish-form'); await waitFor(() => teacher.d.querySelector('.report-stats'), '单班发布');
+    teacher.fill('title', '只发一班'); await teacher.publish(); await waitFor(() => teacher.d.querySelector('.report-stats'), '单班发布');
     teacher.click('.back-link'); await waitFor(() => teacher.d.querySelector('#publish-form'), '再次发布');
-    teacher.fill('title', '两个班同一套题'); teacher.fill('questionCount', 20); teacher.d.querySelector('[name="classIds"][value="2"]').checked = true; teacher.submit('publish-form');
+    teacher.fill('title', '两个班同一套题'); teacher.fill('questionCount', 20); teacher.d.querySelector('[name="classIds"][value="2"]').checked = true; await teacher.publish();
     await waitFor(() => teacher.d.querySelector('.report-stats'), '双班发布');
     const id = Number(teacher.w.location.hash.split('/').at(-1));
     const questions = JSON.parse(app.db.prepare('SELECT questions FROM assignments WHERE id=?').get(id).questions);
@@ -711,7 +815,7 @@ test('混合练习表单按年级选择知识点与提高难度', async () => {
     assert.equal(teacher.d.querySelector('input[value="add-sub-chain"]').checked, true);
     teacher.fill('grade', 3);
     for (const checkbox of teacher.d.querySelectorAll('[name="knowledgePoints"]')) checkbox.checked = checkbox.value === 'parentheses';
-    teacher.fill('difficulty', 'advanced'); teacher.fill('title', '三年级提高括号'); teacher.submit('publish-form');
+    teacher.fill('difficulty', 'advanced'); teacher.fill('title', '三年级提高括号'); await teacher.publish();
     await waitFor(() => teacher.d.querySelector('.report-stats'), '发布提高题');
     assert.ok(teacher.d.querySelector('.page-title p').textContent.includes('3 年级 · 提高'));
     const row = app.db.prepare('SELECT difficulty,mixed_grade,knowledge_points FROM assignments').get();
@@ -725,7 +829,7 @@ test('个人限时页面：开始后倒计时、刷新续计、到时保留答�
   await withPages(async ({ app, page, login }) => {
     const teacher = await page(); await login(teacher, 'teacher', 'Teacher123!');
     app.db.prepare("INSERT INTO users(username,name,password_hash,role) SELECT 'timed','计时学生',password_hash,'student' FROM users WHERE role='teacher'").run();
-    teacher.fill('title', '20分钟练习'); teacher.fill('timeLimitMinutes', 20); teacher.submit('publish-form');
+    teacher.fill('title', '20分钟练习'); teacher.fill('timeLimitMinutes', 20); await teacher.publish();
     await waitFor(() => teacher.d.querySelector('.report-stats'), '发布限时作业');
     let pupil = await page({ cookie: '', monotonic: () => current }); await login(pupil, 'timed', 'Teacher123!'); pupil.click('.student-card');
     await waitFor(() => pupil.d.querySelector('[data-action="start"]'), '打开开始说明');

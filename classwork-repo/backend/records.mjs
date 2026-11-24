@@ -16,5 +16,5 @@ export function historyFilters(url) {
   if (topic && !categories.includes(topic) && !practiceOptions.topics.some(t => t.id === topic)) invalid('请选择有效的知识点或练习内容');
   return { from, to, topic };
 }
-export const matchesTopic = (a, topic) => !topic || a.category === topic || a.knowledgePoints.includes(topic);
+export const matchesTopic = (a, topic) => !topic || a.category === topic || a.selectedCategories?.includes(topic) || a.knowledgePoints.includes(topic);
 export const submissionStatus = s => s?.submitted_at ? 'submitted' : s?.saved_at ? 'draft' : 'unstarted';

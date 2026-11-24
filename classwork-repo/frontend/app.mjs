@@ -4,6 +4,8 @@ const dialog = document.querySelector('#submit-dialog');
 const state = { user: null, assignments: [], students: [], classes: [], classId: null, importResult: null, studentQuery: '', calendarData: null, calendarDay: '', calendarBack: null, historyData: null, reviewData: null, mistakes: null, correction: null, mistakeHistories: {}, practiceOptions: null, assignment: null, dirty: false, busy: false, route: '', loading: false, loadError: '' };
 let loadEpoch = 0;
 let toastTimer;
+state.preview = null; state.publishDraft = null; state.previewFingerprint = ''; state.previewStale = false;
+function resetPublish() { state.preview = null; state.publishDraft = null; state.previewFingerprint = ''; state.previewStale = false; }
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 const date = value => value ? new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date(value)) : '—';
 const assignmentNow = a => a.serverNow && a.receivedAt !== undefined ? Date.parse(a.serverNow) + Math.max(0, performance.now() - a.receivedAt) : Date.now();
@@ -41,7 +43,7 @@ async function api(path, method = 'GET', data) {
   for (const a of Array.isArray(result) ? result : [result]) if (a.serverNow) a.receivedAt = performance.now();
   if (!response.ok) {
     if (response.status === 401 && state.user) {
-      loadEpoch++; state.user = null; state.dirty = false; state.assignment = null; state.assignments = []; state.students = []; state.importResult = null; state.studentQuery = ''; state.calendarData = null; state.calendarBack = null; state.historyData = null; state.reviewData = null; state.mistakes = null; state.correction = null; state.mistakeHistories = {}; render();
+      loadEpoch++; resetPublish(); state.user = null; state.dirty = false; state.assignment = null; state.assignments = []; state.students = []; state.importResult = null; state.studentQuery = ''; state.calendarData = null; state.calendarBack = null; state.historyData = null; state.reviewData = null; state.mistakes = null; state.correction = null; state.mistakeHistories = {}; render();
     }
     throw Object.assign(new Error(result.error || '操作失败，请重试'), { status: response.status });
   }
@@ -70,8 +72,66 @@ const classOptions = (selected = state.classId, classes = state.classes) => clas
 const classPicker = (classes = state.classes) => `<label class="class-picker">当前班级<select name="currentClass">${classOptions(state.classId, classes)}</select></label>`;
 const targetFields = () => `<fieldset class="target-fields"><legend>发布给哪些班级</legend>${state.classes.map(c => `<label><input type="checkbox" name="classIds" value="${c.id}" ${c.id === state.classId ? 'checked' : ''}>${esc(c.name)}</label>`).join('')}</fieldset>`;
 const categoryNames = {
-  'add-sub-20': '20 以内加减', 'mul-div-20': '20 以内乘除', 'mixed-100': '100 以内混合运算'
+  'add-sub-20': '20 以内加减', 'mul-div-20': '20 以内乘除', 'mixed-100': '100 以内混合运算', composite: '综合练习'
 };
+const practiceCategories = ['add-sub-20', 'mul-div-20', 'mixed-100'];
+const difficultyHint = (category, difficulty) => category === 'add-sub-20' ? (difficulty === 'advanced' ? '进位加法、退位减法。' : '不进位加法、不退位减法。') : category === 'mul-div-20' ? (difficulty === 'advanced' ? '优先非平凡口诀与对应除法，排除乘 0/1、除 1 和同数相除。' : '练熟 0、1、2、5、10 等口诀与对应除法。') : (difficulty === 'advanced' ? '混合题实际运算 3 步；专项按提高难度出题。' : '混合题实际运算 2 步；专项按基础难度出题。');
+function publishFormState() {
+  const form = document.querySelector('#publish-form');
+  const value = name => form.elements[name].value;
+  const checked = name => [...form.querySelectorAll(`[name="${name}"]:checked`)].map(n => n.value);
+  return { title: value('title'), category: value('category'), questionCount: Number(value('questionCount')), difficulty: value('difficulty'),
+    selectedCategories: checked('selectedCategories'), classIds: checked('classIds').map(Number), grade: Number(value('grade')),
+    knowledgePoints: checked('knowledgePoints'), timeLimitMinutes: value('timeLimitMinutes'), dueAt: value('dueAt') };
+}
+function draftFromPreview(settings) {
+  return { title: settings.title, category: settings.category, questionCount: settings.questionCount, difficulty: settings.difficulty,
+    selectedCategories: settings.category === 'composite' ? settings.selectedCategories : practiceCategories, classIds: settings.classIds, grade: settings.grade || 3,
+    knowledgePoints: settings.knowledgePoints.length ? settings.knowledgePoints : ['precedence', 'parentheses'], timeLimitMinutes: settings.timeLimitMinutes === null ? '' : String(settings.timeLimitMinutes),
+    dueAt: settings.dueAt ? new Date(Date.parse(settings.dueAt) + 8 * 60 * 60_000).toISOString().slice(0, 16) : '' };
+}
+function restorePublishForm() {
+  const form = document.querySelector('#publish-form'), draft = state.publishDraft;
+  if (!form || !draft) return;
+  for (const [name, value] of Object.entries(draft)) {
+    if (Array.isArray(value)) { for (const field of form.querySelectorAll(`[name="${name}"]`)) field.checked = value.map(String).includes(field.value); }
+    else if (form.elements[name]) form.elements[name].value = String(value);
+  }
+}
+function updatePreviewControls() {
+  const button = document.querySelector('[data-action="confirm-preview"]'), warning = document.querySelector('#preview-stale');
+  if (button) button.disabled = state.previewStale;
+  if (warning) warning.hidden = !state.previewStale;
+}
+function publishChanged() {
+  state.publishDraft = publishFormState();
+  state.previewStale = !!state.preview && JSON.stringify(state.publishDraft) !== state.previewFingerprint;
+  updatePreviewControls();
+}
+async function requestPreview(form) {
+  await formAction(form, 'publish-error', async () => {
+    const draft = publishFormState(), fingerprint = JSON.stringify(draft); state.publishDraft = draft;
+    const preview = await api('/assignment-previews', 'POST', { ...draft, timeLimitMinutes: draft.timeLimitMinutes ? Number(draft.timeLimitMinutes) : null, dueAt: draft.dueAt ? `${draft.dueAt}+08:00` : null });
+    state.preview = preview; state.previewFingerprint = fingerprint; state.previewStale = JSON.stringify(state.publishDraft) !== fingerprint;
+    render(); document.querySelector('#assignment-preview')?.scrollIntoView?.({ block: 'start' });
+  });
+}
+async function confirmPreview() {
+  if (state.busy || !state.preview || state.previewStale) return;
+  if (JSON.stringify(publishFormState()) !== state.previewFingerprint) { state.previewStale = true; updatePreviewControls(); return; }
+  const button = document.querySelector('[data-action="confirm-preview"]');
+  const controls = [...document.querySelectorAll('#publish-form input,#publish-form select,#publish-form button')].map(field => [field, field.disabled]);
+  state.busy = true; button.disabled = true; controls.forEach(([field]) => { field.disabled = true; }); errorAt('preview-error', '');
+  try {
+    const a = await api(`/assignment-previews/${encodeURIComponent(state.preview.previewId)}/publish`, 'POST', {});
+    resetPublish(); toast('作业已发布，题目和顺序与最后预览一致。'); location.hash = `#/assignment/${a.id}`;
+  } catch (e) { if ([400, 409].includes(e.status)) state.previewStale = true; errorAt('preview-error', e.message); }
+  finally { state.busy = false; controls.forEach(([field, disabled]) => { field.disabled = disabled; }); updatePreviewControls(); }
+}
+function previewView(p) {
+  const a = p.settings;
+  return `<section class="panel assignment-preview" id="assignment-preview" aria-labelledby="preview-title" data-preview-id="${esc(p.previewId)}"><div class="section-heading"><div><span class="eyebrow">仅教师可见 · 尚未发布</span><h2 id="preview-title">${esc(a.title)} · 整卷预览</h2></div><button class="text-button" data-action="edit-preview">修改设置 ↓</button></div><p class="muted">${assignmentSummary({ ...a, components: p.components, knowledgePointNames: a.knowledgePoints.map(id => state.practiceOptions.topics.find(t => t.id === id)?.name ?? id) })}<br>发布给：${a.classIds.map(id => esc(state.classes.find(c => c.id === id)?.name ?? '班级已变更')).join('、')} · ${deadline(a)}</p><div class="preview-counts">${p.components.map(c => `<span class="badge" data-preview-category="${c.category}">${categoryNames[c.category]} ${c.count} 题</span>`).join('')}</div><p class="preview-difficulty">${p.usesCurrentRules ? p.components.map(c => `${categoryNames[c.category]}：${difficultyHint(c.category, a.difficulty)}`).join(' ') : '沿用历史预览原题；新生成卷按当前难度规则出题。'}</p><p id="preview-stale" class="preview-stale" ${state.previewStale ? '' : 'hidden'}>设置已修改，请更新预览后再确认发布。</p><ol class="preview-questions">${p.expressions.map((expression, i) => `<li><span class="preview-question-number">${i + 1}.</span><span>${esc(expression)} ＝ ?</span><small>${categoryNames[p.questionCategories[i]]}</small></li>`).join('')}</ol><div class="actions preview-actions"><button class="button secondary" data-action="replace-preview">换一套</button><button class="button" data-action="confirm-preview" ${state.previewStale ? 'disabled' : ''}>确认发布 →</button></div><p id="preview-error" class="form-error" role="alert"></p></section>`;
+}
 const routePath = () => location.hash.split('?')[0];
 const routeParams = () => new URLSearchParams(location.hash.split('?')[1] ?? '');
 const recordFilters = params => Object.fromEntries(['from', 'to', 'topic'].map(key => [key, params.get(key) || '']));
@@ -125,17 +185,21 @@ function calendarView(c) {
     <section class="calendar-daily" aria-labelledby="calendar-daily-title"><div class="section-heading"><h2 id="calendar-daily-title">${esc(c.className)} · ${dayLabel(selected.date)}</h2><div class="actions"><span class="badge">${selected.assignments.length} 份练习</span><button class="text-button" data-action="calendar-grid">返回月历</button></div></div><div class="calendar-papers">${selected.assignments.map(a => `<a class="assignment-card calendar-paper" data-calendar-assignment="${a.id}" href="#/assignment/${a.id}?classId=${c.classId}&calendar=${selected.date}"><div class="card-top"><span class="eyebrow">${assignmentSummary(a)}</span><span class="arrow">↗</span></div><h3>${esc(a.title)}</h3><p class="muted">${date(a.createdAt)} 发布（北京时间）<br><span class="calendar-deadline">${deadline(a)}</span></p><div class="card-stats"><div><strong>${a.submitted}<small> / ${a.total}</small></strong><span>本班已交人数</span></div><div><strong>${a.pending}</strong><span>本班未交人数</span></div><div><strong ${a.average === null ? 'class="calendar-no-average"' : ''}>${a.average === null ? '暂无均分' : a.average}</strong><span>本班平均分</span></div></div><span class="calendar-detail-link">查看成绩明细 →</span></a>`).join('') || '<div class="empty panel"><h3>这一天没有发布练习</h3><p>可点击其他日期，或翻月查看。</p></div>'}</div></section>`;
 }
 function assignmentSummary(a) {
-  return `${categoryNames[a.category]} · ${a.questionCount} 题${a.grade ? ` · ${a.grade} 年级 · ${a.difficulty === 'advanced' ? '提高' : '基础'} · ${esc(a.knowledgePointNames.join('、'))}` : ''}${a.timeLimitMinutes ? ` · 个人限时 ${a.timeLimitMinutes} 分钟` : ''}`;
+  return `${categoryNames[a.category]} · ${a.questionCount} 题${a.grade ? ` · ${a.grade} 年级` : ''}${a.difficulty ? ` · ${a.difficulty === 'advanced' ? '提高' : '基础'}` : ''}${a.category === 'composite' && a.components ? ` · ${a.components.map(c => `${categoryNames[c.category]} ${c.count} 题`).join(' / ')}` : ''}${a.grade ? ` · ${esc(a.knowledgePointNames.join('、'))}` : ''}${a.timeLimitMinutes ? ` · 个人限时 ${a.timeLimitMinutes} 分钟` : ''}`;
 }
 function practiceFields() {
   const p = state.practiceOptions;
   if (!p) return '';
-  return `<fieldset id="practice-fields" class="practice-fields" hidden disabled><legend>混合练习内容</legend><label>年级<select name="grade">${p.grades.map(g => `<option value="${g}" ${g === 3 ? 'selected' : ''}>${g} 年级</option>`).join('')}</select></label><div class="topic-options"><span>勾选本班已学知识点</span>${p.topics.map(t => `<label data-min-grade="${t.minGrade}"><input type="checkbox" name="knowledgePoints" value="${t.id}" ${['precedence', 'parentheses'].includes(t.id) ? 'checked' : ''}>${esc(t.name)}</label>`).join('')}</div><label>练习难度<select name="difficulty">${p.difficulties.map(d => `<option value="${d.id}">${esc(d.name)}</option>`).join('')}</select></label><small>年级用于筛选，按本班实际学习进度勾选。提高题增加实际运算步数，数字仍在 100 以内。</small></fieldset>`;
+  return `<fieldset id="practice-fields" class="practice-fields" hidden disabled><legend>混合练习内容</legend><label>年级<select name="grade">${p.grades.map(g => `<option value="${g}" ${g === 3 ? 'selected' : ''}>${g} 年级</option>`).join('')}</select></label><div class="topic-options"><span>勾选本班已学知识点</span>${p.topics.map(t => `<label data-min-grade="${t.minGrade}"><input type="checkbox" name="knowledgePoints" value="${t.id}" ${['precedence', 'parentheses'].includes(t.id) ? 'checked' : ''}>${esc(t.name)}</label>`).join('')}</div><small>年级用于筛选，按本班实际学习进度勾选。混合题基础 2 步、提高 3 步，数字仍在 100 以内。</small></fieldset>`;
 }
 function syncPracticeFields() {
   const fields = document.querySelector('#practice-fields');
   if (!fields) return;
-  fields.hidden = fields.disabled = document.querySelector('[name="category"]').value !== 'mixed-100';
+  const category = document.querySelector('[name="category"]').value, composite = document.querySelector('#composite-fields');
+  composite.hidden = composite.disabled = category !== 'composite';
+  const mixed = category === 'mixed-100' || category === 'composite' && !!composite.querySelector('[value="mixed-100"]:checked');
+  document.querySelector('#difficulty-hint').textContent = difficultyHint(category, document.querySelector('[name="difficulty"]').value);
+  fields.hidden = fields.disabled = !mixed;
   if (fields.disabled) return;
   const grade = Number(fields.querySelector('[name="grade"]').value);
   for (const label of fields.querySelectorAll('[data-min-grade]')) {
@@ -147,9 +211,9 @@ function syncPracticeFields() {
 }
 function teacherHome() {
   return `${classPicker()}${pageTitle('教师工作台', '每一份练习，都看得见', `${esc(state.classes.find(c => c.id === state.classId)?.name)} · ${state.students.length} 名学生 · 已发布 ${state.assignments.length} 份作业`, '<button class="button secondary" data-action="refresh">刷新成绩 ↻</button>')}
-    <div class="teacher-layout"><section><div class="section-heading"><h2>班级作业</h2><span class="muted">最新发布在前</span></div>
+    ${state.preview ? previewView(state.preview) : ''}<div class="teacher-layout"><section><div class="section-heading"><h2>班级作业</h2><span class="muted">最新发布在前</span></div>
     ${state.assignments.length ? `<div class="assignment-list">${state.assignments.map(a => `<a class="assignment-card" href="#/assignment/${a.id}"><div class="card-top"><span class="eyebrow">${assignmentSummary(a)}</span><span class="arrow">↗</span></div><h3>${esc(a.title)}</h3><p class="muted">发布于 ${date(a.createdAt)}<br>${deadline(a)}</p><div class="card-stats"><div><strong>${a.submitted}<small> / ${a.total}</small></strong><span>已交人数</span></div><div><strong>${a.pending}</strong><span>未交人数</span></div><div><strong>${a.average ?? '—'}</strong><span>平均分</span></div></div></a>`).join('')}</div>` : '<div class="empty"><span class="empty-symbol">＋ −</span><h3>从第一份练习开始</h3><p>选择题型和题量，发布全班的计算练习。</p></div>'}</section>
-    <aside class="panel publish-panel"><span class="eyebrow">一份小练习</span><h2>发布新作业</h2><p class="muted">选择题型和接收班级，所选班级完成同一套题，满分 100 分。</p><form id="publish-form"><label>作业名称<input name="title" required maxlength="60" placeholder="例如：周三计算小练习"></label><label>练习题型<select name="category">${Object.entries(categoryNames).map(([value, label]) => `<option value="${value}">${label}</option>`).join('')}</select></label>${practiceFields()}${targetFields()}<label>题目数量<select name="questionCount">${[10, 20, 50].map(n => `<option value="${n}">${n} 道</option>`).join('')}</select></label><label>每人作答时间（分钟，可选）<input type="number" name="timeLimitMinutes" min="1" max="1440" step="1" placeholder="例如：20"><small>留空则不限制个人时长，点击开始后连续计时。</small></label><label>截止时间（北京时间，可选）<input type="datetime-local" name="dueAt" step="60"><small>留空则不限时；到点停止提交，仍可保存草稿。</small></label><div class="paper-spec"><span>总分<strong>100 分，按答对比例计分</strong></span><span>面向学生<strong>所选班级学生</strong></span></div><p class="form-error" id="publish-error" role="alert"></p><button type="submit" class="button full">发布作业 ＋</button></form><p class="small muted">发布后，所选班级学生可以开始作答；其他班级看不到这份新作业。</p></aside></div>`;
+    <aside class="panel publish-panel"><span class="eyebrow">一份小练习</span><h2>发布新作业</h2><p class="muted">选择题型和接收班级，所选班级完成同一套题，满分 100 分。</p><form id="publish-form"><label>作业名称<input name="title" required maxlength="60" placeholder="例如：周三计算小练习"></label><label>练习题型<select name="category">${Object.entries(categoryNames).map(([value, label]) => `<option value="${value}">${label}</option>`).join('')}</select></label><fieldset id="composite-fields" class="practice-fields" hidden disabled><legend>综合练习包含</legend>${practiceCategories.map(c => `<label><input type="checkbox" name="selectedCategories" value="${c}" checked>${categoryNames[c]}</label>`).join('')}<small>勾选两类或三类，题量尽量均分；余题按加减、乘除、混合顺序分配。</small></fieldset><label>练习难度<select name="difficulty"><option value="basic">基础</option><option value="advanced">提高</option></select><small id="difficulty-hint"></small></label>${practiceFields()}${targetFields()}<label>题目数量<select name="questionCount">${[10, 20, 50].map(n => `<option value="${n}">${n} 道</option>`).join('')}</select></label><label>每人作答时间（分钟，可选）<input type="number" name="timeLimitMinutes" min="1" max="1440" step="1" placeholder="例如：20"><small>留空则不限制个人时长，点击开始后连续计时。</small></label><label>截止时间（北京时间，可选）<input type="datetime-local" name="dueAt" step="60"><small>留空则不限时；到点停止提交，仍可保存草稿。</small></label><div class="paper-spec"><span>总分<strong>100 分，按答对比例计分</strong></span><span>面向学生<strong>所选班级学生</strong></span></div><p class="form-error" id="publish-error" role="alert"></p><button type="submit" class="button full">生成 / 更新预览</button></form><p class="small muted">发布后，所选班级学生可以开始作答；其他班级看不到这份新作业。</p></aside></div>`;
 }
 function studentsView() {
   const currentClass = state.classes.find(c => c.id === state.classId);
@@ -230,9 +294,9 @@ function workbook(a) {
   const sourceNote = original ? `<div class="mistake-source-note">来自错题本 · 第 ${original[2]} 题已标出。<a href="#/mistakes/${original[1]}/${original[2]}">合上原卷，独立订正 →</a></div>` : '';
   if (a.timeLimitMinutes && !a.startedAt && !done) return `<a class="back-link" href="#/">← 返回我的作业</a>${pageTitle('限时练习', esc(a.title), `${assignmentSummary(a)} · ${deadline(a)}`)}<section class="panel"><h2>准备好后开始作答</h2><p>点击后开始计时，刷新或重新登录不会暂停。个人限时和全班截止以先到者为准；到点仍可保存草稿，未提交计为未交。</p><button class="button" data-action="start" ${closed(a) ? 'disabled' : ''}>${closed(a) ? '已截止，不能开始' : '开始作答'}</button><p id="start-error" class="form-error" role="alert"></p></section>`;
   const count = a.answers.filter(v => v !== null).length;
-  return `<a class="back-link" href="${original ? '#/mistakes' : '#/'}">← 返回${original ? '我的错题本' : '我的作业'}</a>${sourceNote}<div class="workbook-heading">${pageTitle(done ? '练习完成' : '专心算一算', esc(a.title), `${assignmentSummary(a)} · 每题 ${100 / a.questionCount} 分 · 答案是 0–${a.answerMax} 的整数 · ${deadline(a)}`)}${done ? `<div class="score-stamp"><strong>${a.score}</strong><span>/ 100 分</span></div>` : ''}</div>
+  return `<a class="back-link" href="${original ? '#/mistakes' : '#/'}">← 返回${original ? '我的错题本' : '我的作业'}</a>${sourceNote}<div class="workbook-heading">${pageTitle(done ? '练习完成' : '专心算一算', esc(a.title), `${assignmentSummary(a)} · 每题 ${100 / a.questionCount} 分 · ${a.category === 'composite' ? '按每题标注的范围填写整数' : `答案是 0–${a.answerMax} 的整数`} · ${deadline(a)}`)}${done ? `<div class="score-stamp"><strong>${a.score}</strong><span>/ 100 分</span></div>` : ''}</div>
     ${done ? `<div class="result-banner"><strong>${a.score === 100 ? '全部答对，真棒！' : `答对了 ${a.results.filter(r => r.correct).length} / ${a.questionCount} 道题，再看看需要订正的地方。`}</strong><span>${date(a.submittedAt)} 提交 · 已自动批改</span></div>` : `<div class="progress-heading"><span id="progress-label">已作答 ${count} / ${a.questionCount} 题</span><span id="save-state" class="muted">${a.savedAt ? `草稿保存于 ${date(a.savedAt)}` : '写好几题后，可以先保存草稿。'}</span></div><progress id="progress" max="${a.questionCount}" value="${count}" aria-label="作答进度"></progress>`}
-    ${a.timeLimitMinutes && !done ? `<div class="timer-panel"><strong id="countdown" role="timer"></strong><span>开始于 ${date(a.startedAt)} · 最晚 ${date(a.effectiveDueAt)}（北京时间）</span></div>` : ''}<p id="deadline-state" class="deadline-message" role="status" hidden></p><form id="answer-form"><fieldset ${done ? 'disabled' : ''}><legend class="sr-only">${a.questionCount} 道计算题</legend><div class="question-grid">${a.expressions.map((expression, i) => `<div data-original-question="${i + 1}" class="question ${original && Number(original[2]) === i + 1 ? 'source-question' : ''} ${done ? (a.results[i].correct ? 'correct' : 'incorrect') : ''}"><span class="question-number">第 ${i + 1} 题</span><div class="equation"><label for="answer-${i}"><span class="sr-only">第 ${i + 1} 题：</span>${esc(expression)} <span class="operator">＝</span></label><input id="answer-${i}" name="answer-${i}" type="number" min="0" max="${a.answerMax}" step="1" inputmode="numeric" autocomplete="off" aria-label="第 ${i + 1} 题答案" value="${esc(a.answers[i])}" ${done ? 'readonly' : ''}></div>${done ? `<div class="question-feedback">${a.results[i].correct ? '✓ 答对了' : `✕ 正确答案：${a.results[i].correctAnswer}`}</div>` : ''}</div>`).join('')}</div></fieldset>
+    ${a.timeLimitMinutes && !done ? `<div class="timer-panel"><strong id="countdown" role="timer"></strong><span>开始于 ${date(a.startedAt)} · 最晚 ${date(a.effectiveDueAt)}（北京时间）</span></div>` : ''}<p id="deadline-state" class="deadline-message" role="status" hidden></p><form id="answer-form"><fieldset ${done ? 'disabled' : ''}><legend class="sr-only">${a.questionCount} 道计算题</legend><div class="question-grid">${a.expressions.map((expression, i) => `<div data-original-question="${i + 1}" class="question ${original && Number(original[2]) === i + 1 ? 'source-question' : ''} ${done ? (a.results[i].correct ? 'correct' : 'incorrect') : ''}"><span class="question-number">第 ${i + 1} 题${a.category === 'composite' ? ` · 答案 0–${a.answerMaxes[i]}` : ''}</span><div class="equation"><label for="answer-${i}"><span class="sr-only">第 ${i + 1} 题：</span>${esc(expression)} <span class="operator">＝</span></label><input id="answer-${i}" name="answer-${i}" type="number" min="0" max="${a.answerMaxes?.[i] ?? a.answerMax}" step="1" inputmode="numeric" autocomplete="off" aria-label="第 ${i + 1} 题答案" value="${esc(a.answers[i])}" ${done ? 'readonly' : ''}></div>${done ? `<div class="question-feedback">${a.results[i].correct ? '✓ 答对了' : `✕ 正确答案：${a.results[i].correctAnswer}`}</div>` : ''}</div>`).join('')}</div></fieldset>
     ${done ? '<div class="actions result-actions"><a class="button secondary" href="#/">返回我的作业</a><span class="muted">作业已提交，答案不能再修改。</span></div>' : `<div class="answer-actions"><div><strong>慢慢算，认真检查。</strong><p class="small muted">保存草稿后，下次登录可以接着写。</p></div><div class="actions"><button type="button" class="button secondary" data-action="save">保存草稿</button><button type="submit" class="button" data-submit>提交作业 →</button></div></div><p id="answer-error" class="form-error" role="alert"></p>`}</form>`;
 }
 function render() {
@@ -250,7 +314,9 @@ function render() {
   else view = state.user.role === 'teacher' ? teacherHome() : studentHome();
   root.innerHTML = `${header()}${state.user ? `<main class="main">${view}</main>` : view}<footer>小小算术 <span>·</span> 每天进步一点点</footer>`;
   syncDeadlineUI();
+  restorePublishForm();
   syncPracticeFields();
+  updatePreviewControls();
 }
 async function load() {
   if (!state.user) { render(); return; }
@@ -318,8 +384,14 @@ async function load() {
       const from = params.get('calendar');
       if (state.user.role === 'teacher' && /^\d{4}-\d{2}-\d{2}$/.test(from ?? '') && Number.isFinite(Date.parse(`${from}T00:00:00Z`)) && new Date(`${from}T00:00:00Z`).toISOString().slice(0, 10) === from) state.calendarBack = calendarHref(from.slice(0, 7), from);
     } else if (state.user.role === 'teacher') {
-      const [assignments, students] = await Promise.all([api(`/assignments?classId=${state.classId}`), api(`/students?classId=${state.classId}`)]);
+      const [assignments, students, currentPreview] = await Promise.all([api(`/assignments?classId=${state.classId}`), api(`/students?classId=${state.classId}`), path === '#/students' ? Promise.resolve(null) : api('/assignment-previews/current')]);
       if (epoch !== loadEpoch) return; state.assignments = assignments; state.students = students;
+      const preview = currentPreview?.preview;
+      if (preview && preview.publishedAssignmentId === null) {
+        const restored = draftFromPreview(preview.settings);
+        if (state.preview?.previewId !== preview.previewId) state.previewFingerprint = JSON.stringify(restored);
+        state.preview = preview; state.publishDraft ??= restored; state.previewStale = JSON.stringify(state.publishDraft) !== state.previewFingerprint;
+      } else state.preview = null;
     } else {
       const assignments = await api('/assignments');
       if (epoch !== loadEpoch) return; state.assignments = assignments;
@@ -351,15 +423,11 @@ root.addEventListener('submit', async event => {
     if (location.hash === href) await load(); else location.hash = href;
   }
   if (form.id === 'login-form') await formAction(form, 'login-error', async data => {
+    resetPublish();
     state.user = await api('/login', 'POST', data); state.dirty = false; state.assignments = []; state.students = []; state.importResult = null; state.studentQuery = ''; state.calendarData = null; state.calendarBack = null; state.historyData = null; state.reviewData = null; state.mistakes = null; state.correction = null; state.mistakeHistories = {}; state.assignment = null;
     history.replaceState(null, '', '#/'); await load();
   });
-  if (form.id === 'publish-form') await formAction(form, 'publish-error', async data => {
-    const options = data.category === 'mixed-100' ? { grade: Number(data.grade), knowledgePoints: new FormData(form).getAll('knowledgePoints'), difficulty: data.difficulty } : {};
-    const classIds = new FormData(form).getAll('classIds').map(Number);
-    const a = await api('/assignments', 'POST', { ...data, ...options, classIds, questionCount: Number(data.questionCount), timeLimitMinutes: data.timeLimitMinutes ? Number(data.timeLimitMinutes) : null, dueAt: data.dueAt ? `${data.dueAt}+08:00` : null }); toast('作业已发布，所选班级学生可以开始作答。');
-    location.hash = `#/assignment/${a.id}`;
-  });
+  if (form.id === 'publish-form') await requestPreview(form);
   if (form.id === 'student-form') await formAction(form, 'student-error', async data => {
     const student = await api('/students', 'POST', { ...data, classId: Number(data.classId) }); await load(); toast(`已创建 ${student.name} 的账号：${student.username}`);
   });
@@ -410,7 +478,7 @@ async function saveAnswers(submit = false) {
 root.addEventListener('input', event => {
   if (event.target.name === 'correctionAnswer') { state.correction.answer = event.target.value; state.dirty = true; }
   if (event.target.name === 'studentSearch') { state.studentQuery = event.target.value; updateStudentSearch(); }
-  if (event.target.name === 'category' || event.target.name === 'grade') syncPracticeFields();
+  if (event.target.closest('#publish-form')) { syncPracticeFields(); publishChanged(); }
   if (event.target.closest('#answer-form')) {
     state.dirty = true;
     const inputs = [...document.querySelectorAll('.equation input')];
@@ -421,7 +489,7 @@ root.addEventListener('input', event => {
   }
 });
 root.addEventListener('change', async event => {
-  if (event.target.name === 'category' || event.target.name === 'grade') syncPracticeFields();
+  if (event.target.closest('#publish-form')) { syncPracticeFields(); publishChanged(); }
   if (state.busy) return;
   if (event.target.name === 'currentClass') {
     state.classId = Number(event.target.value); state.importResult = null;
@@ -447,6 +515,9 @@ root.addEventListener('click', async event => {
   const action = event.target.closest('[data-action]')?.dataset.action;
   if (state.busy && (event.target.closest('a') || action)) { event.preventDefault(); return; }
   if (action === 'save') await saveAnswers();
+  if (action === 'confirm-preview') await confirmPreview();
+  if (action === 'replace-preview') { const form = document.querySelector('#publish-form'); if (form.reportValidity()) await requestPreview(form); }
+  if (action === 'edit-preview') { document.querySelector('#publish-form')?.scrollIntoView?.({ block: 'start' }); document.querySelector('#publish-form [name="title"]')?.focus(); }
   if (action === 'retry-correction' && state.correction) {
     const c = state.correction;
     state.correction = { question: { ...c.question, attemptCount: c.feedback.attemptCount }, answer: '', feedback: null, request: null };
@@ -479,7 +550,7 @@ root.addEventListener('click', async event => {
   if (action === 'logout') {
     if (state.dirty && !confirm('还有未保存的答案。确定退出并放弃这些修改吗？')) return;
     state.busy = true;
-    try { await api('/logout', 'POST', {}); loadEpoch++; state.user = null; state.assignment = null; state.assignments = []; state.students = []; state.importResult = null; state.studentQuery = ''; state.calendarData = null; state.calendarBack = null; state.historyData = null; state.reviewData = null; state.mistakes = null; state.correction = null; state.mistakeHistories = {}; state.dirty = false; history.replaceState(null, '', '#/'); render(); }
+    try { await api('/logout', 'POST', {}); loadEpoch++; resetPublish(); state.user = null; state.assignment = null; state.assignments = []; state.students = []; state.importResult = null; state.studentQuery = ''; state.calendarData = null; state.calendarBack = null; state.historyData = null; state.reviewData = null; state.mistakes = null; state.correction = null; state.mistakeHistories = {}; state.dirty = false; history.replaceState(null, '', '#/'); render(); }
     catch (e) { toast(e.message, true); }
     finally { state.busy = false; }
   }

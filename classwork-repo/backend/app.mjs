@@ -1,7 +1,9 @@
 import { createServer } from 'node:http';
 import { createHash, randomBytes } from 'node:crypto';
-import { openStore, hashPassword, verifyPassword, publishAssignment, solution, formatExpression, inferCategory, categories, questionCounts } from './store.mjs';
-import { mixedOptions, practiceOptions } from './questions.mjs';
+import { openStore, hashPassword, verifyPassword, publishAssignment, solution, formatExpression, inferCategory, questionCategoriesFor } from './store.mjs';
+import { practiceOptions } from './questions.mjs';
+import { paperOptions } from './papers.mjs';
+import { readPreview, createPreview, publishPreview } from './previews.mjs';
 import { parseRoster, importRoster, rosterMaxBytes } from './roster.mjs';
 import { calendarMonth, beijingDateKey } from './calendar.mjs';
 import { historyFilters, matchesTopic, submissionStatus } from './records.mjs';
@@ -34,9 +36,9 @@ function textField(value, label, min, max) {
   }
   return value.trim();
 }
-function validateAnswers(answers, complete, answerMax, questionCount) {
+function validateAnswers(answers, complete, answerMax, questionCount, answerMaxes) {
   if (!Array.isArray(answers) || answers.length !== questionCount ||
-      answers.some(a => a !== null && (!Number.isInteger(a) || a < 0 || a > answerMax))) {
+      answers.some((a, i) => a !== null && (!Number.isInteger(a) || a < 0 || a > (answerMaxes?.[i] ?? answerMax)))) {
     fail(400, `请填写 0–${answerMax} 的整数，本份作业共 ${questionCount} 题`);
   }
   if (complete && answers.includes(null)) fail(400, `还有题目未作答，请完成全部 ${questionCount} 题再提交`);
@@ -63,12 +65,15 @@ function validateDueAt(value, currentTime) {
 function readAssignment(row) {
   const questions = JSON.parse(row.questions);
   const category = row.category ?? inferCategory(questions);
+  const questionCategories = questionCategoriesFor(row, questions), selectedCategories = row.selected_categories ? JSON.parse(row.selected_categories) : category === 'composite' ? [...new Set(questionCategories)] : [category];
+  const answerMaxes = questionCategories.map(c => c === 'mixed-100' ? 100 : 20);
   return {
     id: row.id, title: row.title, createdAt: row.created_at, category, questionCount: questions.length, dueAt: row.due_at ?? null,
     timeLimitMinutes: row.time_limit_minutes ?? null,
     difficulty: row.difficulty ?? null, grade: row.mixed_grade ?? null, knowledgePoints: row.knowledge_points ? JSON.parse(row.knowledge_points) : [],
     knowledgePointNames: row.knowledge_points ? JSON.parse(row.knowledge_points).map(id => practiceOptions.topics.find(t => t.id === id)?.name ?? id) : [],
-    answerMax: category === 'mixed-100' ? 100 : 20,
+    selectedCategories, questionCategories, components: selectedCategories.map(category => ({ category, count: questionCategories.filter(c => c === category).length })),
+    answerMax: Math.max(...answerMaxes), answerMaxes,
     questions, expressions: questions.map(q => formatExpression(q))
   };
 }
@@ -86,6 +91,15 @@ export async function createApp({ dbPath = 'data/classwork.sqlite', teacherPassw
   }
   function classFilter(url) {
     return url.searchParams.has('classId') ? validClassId(Number(url.searchParams.get('classId'))) : null;
+  }
+  function assignmentSettings(input) {
+    const title = textField(input.title, '作业名称', 1, 60);
+    const classIds = input.classIds === undefined ? [1] : input.classIds;
+    if (!Array.isArray(classIds) || !classIds.length || new Set(classIds).size !== classIds.length) fail(400, '请选择至少一个班级，不能重复');
+    classIds.forEach(validClassId);
+    const dueAt = validateDueAt(input.dueAt, clock()), timeLimitMinutes = input.timeLimitMinutes ?? null;
+    if (timeLimitMinutes !== null && (!Number.isInteger(timeLimitMinutes) || timeLimitMinutes < 1 || timeLimitMinutes > 1440)) fail(400, '个人限时请填写 1–1440 的整数分钟，或留空');
+    return { ...paperOptions(input), title, classIds, dueAt, timeLimitMinutes };
   }
   function withClasses(row) {
     const classes = db.prepare('SELECT c.id,c.name FROM classes c JOIN assignment_classes ac ON ac.class_id=c.id WHERE ac.assignment_id=? ORDER BY c.id').all(row.id);
@@ -201,6 +215,17 @@ export async function createApp({ dbPath = 'data/classwork.sqlite', teacherPassw
         WHERE s.token_hash=? AND s.expires>?`).get(digest(rawToken), Date.now());
       if (!user) fail(401, '请先登录');
       if (path === '/api/me' && req.method === 'GET') return send(200, safeUser(user));
+      if (path === '/api/assignment-previews/current' && req.method === 'GET') { requireRole(user, 'teacher'); return send(200, { preview: readPreview(db, user.id) }); }
+      if (path === '/api/assignment-previews' && req.method === 'POST') {
+        requireRole(user, 'teacher'); const settings = assignmentSettings(await body(req));
+        return send(201, createPreview(db, user.id, settings, clock()));
+      }
+      const publishMatch = path.match(/^\/api\/assignment-previews\/([^/]+)\/publish$/);
+      if (publishMatch && req.method === 'POST') {
+        requireRole(user, 'teacher'); await body(req);
+        const result = publishPreview(db, user.id, decodeURIComponent(publishMatch[1]), clock(), assignmentSettings);
+        return send(result.created ? 201 : 200, report(assignment(result.id)));
+      }
       if (path === '/api/mistakes' && req.method === 'GET') {
         requireRole(user, 'student'); return send(200, mistakeBook(db, user.id));
       }
@@ -237,7 +262,7 @@ export async function createApp({ dbPath = 'data/classwork.sqlite', teacherPassw
           if (!canAccess(a, pupil) || !matchesTopic(a, filters.topic)) continue;
           const reviewClassId = a.classIds.includes(classId) ? classId : 1;
           assignments.push({ id: a.id, title: a.title, createdAt: a.createdAt, dueAt: a.dueAt, category: a.category,
-            questionCount: a.questionCount, knowledgePoints: a.knowledgePoints, knowledgePointNames: a.knowledgePointNames,
+            questionCount: a.questionCount, knowledgePoints: a.knowledgePoints, knowledgePointNames: a.knowledgePointNames, components: a.components,
             savedAt: row.saved_at ?? null, submittedAt: row.submitted_at ?? null, score: row.submitted_at ? row.score : null,
             status: submissionStatus(row), reviewClassId, reviewClassName: a.classes.find(c => c.id === reviewClassId).name });
         }
@@ -263,7 +288,7 @@ export async function createApp({ dbPath = 'data/classwork.sqlite', teacherPassw
           const a = withClasses(row), summary = report(a, classId);
           grouped.get(beijingDateKey(a.createdAt)).assignments.push({
             id: a.id, title: a.title, createdAt: a.createdAt, dueAt: a.dueAt,
-            category: a.category, questionCount: a.questionCount,
+            category: a.category, questionCount: a.questionCount, components: a.components, difficulty: a.difficulty,
             submitted: summary.submitted, pending: summary.pending, total: summary.total, average: summary.average
           });
         }
@@ -342,23 +367,8 @@ export async function createApp({ dbPath = 'data/classwork.sqlite', teacherPassw
         }
         if (req.method === 'POST') {
           requireRole(user, 'teacher');
-          const input = await body(req);
-          const title = textField(input.title, '作业名称', 1, 60);
-          const classIds = input.classIds === undefined ? [1] : input.classIds;
-          if (!Array.isArray(classIds) || !classIds.length || new Set(classIds).size !== classIds.length) fail(400, '请选择至少一个班级，不能重复');
-          classIds.forEach(validClassId);
-          const category = input.category === undefined ? 'add-sub-20' : input.category;
-          const questionCount = input.questionCount === undefined ? 10 : input.questionCount;
-          if (!categories.includes(category)) fail(400, '请选择一种有效题型');
-          if (!questionCounts.includes(questionCount)) fail(400, '题目数量请选择 10、20 或 50 道');
-          const dueAt = validateDueAt(input.dueAt, clock());
-          const timeLimitMinutes = input.timeLimitMinutes ?? null;
-          if (timeLimitMinutes !== null && (!Number.isInteger(timeLimitMinutes) || timeLimitMinutes < 1 || timeLimitMinutes > 1440)) fail(400, '个人限时请填写 1–1440 的整数分钟，或留空');
-          let options = {};
-          if (category === 'mixed-100') {
-            try { options = mixedOptions(input); } catch (e) { fail(400, e.message); }
-          }
-          const id = publishAssignment(db, title, { category, questionCount, dueAt, timeLimitMinutes, classIds, ...options });
+          const settings = assignmentSettings(await body(req));
+          const id = publishAssignment(db, settings.title, settings);
           return send(201, report(assignment(id)));
         }
       }
@@ -398,7 +408,7 @@ export async function createApp({ dbPath = 'data/classwork.sqlite', teacherPassw
             fail(409, '作业已提交，不能再修改答案');
           }
           if (a.timeLimitMinutes && !latest.startedAt) fail(400, '请先点击开始作答');
-          const answers = validateAnswers(input.answers, action === 'submit', a.answerMax, a.questionCount);
+          const answers = validateAnswers(input.answers, action === 'submit', a.answerMax, a.questionCount, a.answerMaxes);
           const correct = a.questions.filter((q, i) => solution(q) === answers[i]).length;
           const score = action === 'submit' ? correct * 100 / a.questionCount : null;
           const stamp = clock();

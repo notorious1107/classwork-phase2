@@ -1,9 +1,11 @@
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { randomBytes, scrypt as scryptCallback, timingSafeEqual, randomInt } from 'node:crypto';
+import { randomBytes, scrypt as scryptCallback, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
-import { generateMixed, mixedOptions } from './questions.mjs';
+import { paperOptions, generatePaper } from './papers.mjs';
+import { initializePreviews } from './preview-store.mjs';
+export { categories, questionCounts } from './papers.mjs';
 
 const scrypt = promisify(scryptCallback);
 export async function hashPassword(password) {
@@ -16,48 +18,31 @@ export async function verifyPassword(password, stored) {
   const actual = await scrypt(password, salt, 64);
   return timingSafeEqual(actual, Buffer.from(expected, 'hex'));
 }
-export const categories = ['add-sub-20', 'mul-div-20', 'mixed-100'];
-export const questionCounts = [10, 20, 50];
-
-function binaryQuestion(op, max) {
-  const a = randomInt(0, max + 1);
-  const candidates = Array.from({ length: max + 1 }, (_, b) => b).filter(b => {
-    const value = operators[op].apply(a, b);
-    return (op !== '/' || b !== 0) && Number.isInteger(value) && value >= 0 && value <= max;
-  });
-  if (!candidates.length) return binaryQuestion(op, max);
-  return { a, b: candidates[randomInt(candidates.length)], op };
-}
 export function generateQuestions(category = 'add-sub-20', questionCount = 10, options) {
-  if (!categories.includes(category) || !questionCounts.includes(questionCount)) throw new Error('无效的作业题型或题量');
-  if (category === 'mixed-100') return generateMixed(questionCount, options);
-  const questions = [];
-  const used = new Set();
-  while (questions.length < questionCount) {
-    let q;
-    const ops = category === 'add-sub-20' ? ['+', '-'] : ['*', '/'];
-    q = binaryQuestion(ops[questions.length % 2], 20);
-    const key = JSON.stringify(q);
-    if (used.has(key)) continue;
-    used.add(key);
-    questions.push(q);
-  }
-  return questions;
+  return generatePaper(paperOptions({ ...options, category, questionCount })).questions;
 }
 
 export function publishAssignment(db, title, { category = 'add-sub-20', questionCount = 10, dueAt = null, timeLimitMinutes = null, classIds = [1], ...input } = {}) {
-  const options = category === 'mixed-100' ? mixedOptions(input) : null;
-  const questions = JSON.stringify(generateQuestions(category, questionCount, options));
+  const options = { ...paperOptions({ ...input, category, questionCount }), title, dueAt, timeLimitMinutes, classIds };
+  const paper = generatePaper(options);
   db.exec('BEGIN IMMEDIATE');
   try {
-    const result = db.prepare(`INSERT INTO assignments(title,questions,created_at,category,due_at,time_limit_minutes,question_count,difficulty,mixed_grade,knowledge_points)
-    VALUES(?,?,?,?,?,?,?,?,?,?)`)
-    .run(title, questions, new Date().toISOString(), category, dueAt, timeLimitMinutes,
-      questionCount, options?.difficulty ?? null, options?.grade ?? null, options ? JSON.stringify(options.knowledgePoints) : null);
-    const id = Number(result.lastInsertRowid);
-    for (const classId of classIds) db.prepare('INSERT INTO assignment_classes(assignment_id,class_id) VALUES(?,?)').run(id, classId);
+    const id = insertAssignment(db, options, paper);
     db.exec('COMMIT'); return id;
   } catch (e) { db.exec('ROLLBACK'); throw e; }
+}
+// Call inside a transaction so a preview publication and its published id are committed together.
+export function insertAssignment(db, options, paper, createdAt = new Date().toISOString()) {
+  const result = db.prepare(`INSERT INTO assignments(title,questions,created_at,category,due_at,time_limit_minutes,question_count,difficulty,mixed_grade,knowledge_points,selected_categories,question_categories)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`).run(options.title, JSON.stringify(paper.questions), createdAt, options.category, options.dueAt ?? null, options.timeLimitMinutes ?? null,
+      paper.questions.length, options.difficulty, options.grade, options.knowledgePoints.length ? JSON.stringify(options.knowledgePoints) : null,
+      JSON.stringify(options.selectedCategories), JSON.stringify(paper.questionCategories));
+  const id = Number(result.lastInsertRowid);
+  for (const classId of options.classIds) db.prepare('INSERT INTO assignment_classes(assignment_id,class_id) VALUES(?,?)').run(id, classId);
+  return id;
+}
+export function questionCategoriesFor(row, questions = JSON.parse(row.questions)) {
+  return row.question_categories ? JSON.parse(row.question_categories) : questions.map(q => row.category === 'composite' ? inferCategory([q]) : row.category ?? inferCategory(questions));
 }
 
 const operators = {
@@ -144,7 +129,7 @@ export async function openStore(path, teacherPassword = 'Teacher123!') {
   if (!db.prepare("SELECT 1 FROM pragma_table_info('assignments') WHERE name='time_limit_minutes'").get()) {
     db.exec('ALTER TABLE assignments ADD COLUMN time_limit_minutes INTEGER');
   }
-  for (const [name, type] of [['question_count', 'INTEGER'], ['difficulty', 'TEXT'], ['mixed_grade', 'INTEGER'], ['knowledge_points', 'TEXT']]) {
+  for (const [name, type] of [['question_count', 'INTEGER'], ['difficulty', 'TEXT'], ['mixed_grade', 'INTEGER'], ['knowledge_points', 'TEXT'], ['selected_categories', 'TEXT'], ['question_categories', 'TEXT']]) {
     if (!db.prepare("SELECT 1 FROM pragma_table_info('assignments') WHERE name=?").get(name)) db.exec(`ALTER TABLE assignments ADD COLUMN ${name} ${type}`);
   }
   db.exec(`CREATE TABLE IF NOT EXISTS assignment_starts (
@@ -175,6 +160,7 @@ export async function openStore(path, teacherPassword = 'Teacher123!') {
       INSERT INTO legacy_assignment_students SELECT a.id,u.id FROM assignments a CROSS JOIN users u WHERE u.role='student';`);
     db.exec('COMMIT');
   } catch (e) { db.exec('ROLLBACK'); throw e; }
+  initializePreviews(db);
   if (!db.prepare("SELECT id FROM users WHERE role='teacher'").get()) {
     db.prepare('INSERT INTO users(username,name,password_hash,role) VALUES(?,?,?,?)')
       .run('teacher', '数学老师', await hashPassword(teacherPassword), 'teacher');

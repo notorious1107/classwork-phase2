@@ -183,3 +183,28 @@ select{font:inherit;display:block;width:100%;border:1px solid #cbd6e8;border-rad
   .correction-explanation li:before{left:12px;top:16px}
   .mistake-source-note a{display:block;margin-left:0;margin-top:8px}
 }
+
+.assignment-preview{margin-bottom:32px;border-top:4px solid var(--yellow);scroll-margin-top:20px}
+.assignment-preview>.section-heading{align-items:center;flex-wrap:wrap}
+.assignment-preview .eyebrow{margin-bottom:10px}
+.assignment-preview h2{font-size:23px;line-height:1.6;overflow-wrap:anywhere}
+.assignment-preview .text-button{font-size:12px;color:var(--blue)}
+.preview-counts{display:flex;gap:10px;flex-wrap:wrap;margin:18px 0}
+.assignment-preview>.preview-difficulty{font-size:12px;color:var(--muted);line-height:1.9}
+.preview-stale{background:#fff2c9;border-left:4px solid #e6b53b;padding:14px;color:#866016}
+.preview-stale[hidden]{display:none}
+.preview-questions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));list-style:none;padding:0;margin:24px 0;gap:12px}
+.preview-questions li{padding:18px;background:#f7f9fd;border:1px solid var(--line);border-radius:10px;display:grid;grid-template-columns:30px minmax(0,1fr);gap:8px;font:600 22px/1.7 Consolas,"Microsoft YaHei",monospace;overflow-wrap:anywhere}
+.preview-question-number{font-size:13px;color:var(--muted);line-height:2.8}
+.preview-questions small{grid-column:2;font:400 10px/1.5 "Microsoft YaHei",sans-serif;color:var(--muted)}
+.preview-actions{flex-wrap:wrap;justify-content:flex-end;border-top:1px dashed var(--line);padding-top:24px}
+.preview-actions .button:disabled{cursor:not-allowed}
+#publish-form{scroll-margin-top:24px}
+#composite-fields label{display:flex;align-items:center;gap:8px;font-size:12px;margin-top:12px}
+#composite-fields input{width:16px;height:16px;margin:0;padding:0}
+@media(max-width:700px){
+  .assignment-preview h2{font-size:20px}
+  .preview-questions{grid-template-columns:1fr}
+  .preview-questions li{font-size:21px;padding:14px;grid-template-columns:24px minmax(0,1fr)}
+  .preview-actions>*{flex:1;padding:12px;font-size:12px}
+}
