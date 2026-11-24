@@ -264,6 +264,79 @@ test('北京时间发布、页面到点保留答案、逾期存草稿和已交�
   }, undefined, { clock: () => currentTime });
 });
 
+test('名单文件上传、逐行反馈、刷新名单与前导零账号登录', async () => {
+  await withPages(async ({ app, base, page, login }) => {
+    app.db.prepare("INSERT INTO classes(name) VALUES('二班')").run();
+    app.db.prepare("INSERT INTO users(username,name,password_hash,role,class_id) SELECT 'old01','原学生',password_hash,'student',2 FROM users WHERE role='teacher'").run();
+    const teacher = await page(); await login(teacher, 'teacher', 'Teacher123!'); teacher.click('a[href="#/students"]');
+    await waitFor(() => teacher.d.querySelector('#import-form'), '导入入口');
+    const downloaded = await fetch(base + teacher.d.querySelector('a[download]').getAttribute('href'));
+    assert.equal(downloaded.status, 200); assert.ok(downloaded.headers.get('content-type').includes('spreadsheetml'));
+    const xlsx = await readFile(new URL('../frontend/student-roster-template.xlsx', import.meta.url));
+    assert.deepEqual(Buffer.from(await downloaded.arrayBuffer()), xlsx);
+    const attach = (name, data) => {
+      Object.defineProperty(teacher.d.querySelector('[name="rosterFile"]'), 'files', { configurable: true, value: [new teacher.w.File([data], name)] });
+    };
+    attach('不支持.txt', '学号,姓名'); teacher.submit('import-form');
+    await waitFor(() => teacher.d.querySelector('#import-error').textContent.includes('.xlsx'), '格式提示');
+    const csv = '学号,姓名\n00123,张宁\n,没有学号\n00777,甲\n00777,乙\nold01,换名\n00124,张宁\n';
+    attach('一班.csv', csv); teacher.session.failPath = '/students/import'; teacher.submit('import-form');
+    await waitFor(() => teacher.d.querySelector('#import-error').textContent.includes('连接失败'), '导入断网提示');
+    assert.equal(teacher.d.querySelector('[name="rosterFile"]').files[0].name, '一班.csv');
+    teacher.session.failPath = ''; teacher.submit('import-form');
+    await waitFor(() => teacher.d.querySelector('#import-result'), '显示导入结果');
+    assert.match(teacher.d.querySelector('#import-result strong').textContent, /已导入 2 名，跳过 4 行/);
+    assert.deepEqual([...teacher.d.querySelectorAll('#import-result tbody td:first-child')].map(n => n.textContent), ['第 3 行', '第 4 行', '第 5 行', '第 6 行']);
+    const rows = teacher.d.querySelectorAll('#student-form'); assert.equal(rows.length, 1);
+    assert.equal(app.db.prepare("SELECT class_id FROM users WHERE username='old01'").get().class_id, 2);
+    assert.ok(teacher.d.querySelector('.teacher-layout tbody').textContent.includes('00123'));
+    assert.ok(teacher.d.querySelector('.teacher-layout tbody').textContent.includes('00124'));
+    const pupil = await page(); await login(pupil, '00123', '00123');
+    assert.ok(pupil.d.querySelector('.user').textContent.includes('00123'));
+    const chooser = teacher.d.querySelector('[name="currentClass"]'); chooser.value = '2'; chooser.dispatchEvent(new teacher.w.Event('change', { bubbles: true }));
+    await waitFor(() => teacher.d.querySelector('h2')?.textContent === '批量导入到 二班', '导入切班');
+    assert.equal(teacher.d.querySelector('#import-result'), null);
+    attach('样例.xlsx', xlsx); teacher.submit('import-form');
+    await waitFor(() => teacher.d.querySelector('#import-result'), '真实 Excel 上传');
+    assert.match(teacher.d.querySelector('#import-result strong').textContent, /已导入 1 名，跳过 2 行/);
+    assert.ok(teacher.d.querySelector('.teacher-layout tbody').textContent.includes('00125'));
+    assert.ok(!teacher.d.querySelector('.teacher-layout tbody').textContent.includes('00123'));
+  });
+});
+
+test('导入后按姓名和学号搜索当前班，换班不混入同名学生，清空恢复全班', async () => {
+  await withPages(async ({ app, page, login }) => {
+    app.db.prepare("INSERT INTO classes(name) VALUES('二班')").run();
+    for (const [username, name] of [['10223', '张宁'], ['10224', '小林']]) app.db.prepare("INSERT INTO users(username,name,password_hash,role,class_id) SELECT ?,?,password_hash,'student',2 FROM users WHERE role='teacher'").run(username, name);
+    const teacher = await page(); await login(teacher, 'teacher', 'Teacher123!'); teacher.click('a[href="#/students"]');
+    await waitFor(() => teacher.d.querySelector('#import-form'), '名单与搜索入口');
+    const attach = data => Object.defineProperty(teacher.d.querySelector('[name="rosterFile"]'), 'files', { configurable: true, value: [new teacher.w.File([data], '名单.csv')] });
+    attach('学号,姓名\n00123,张宁\n00124,张宁\n00125,李雪'); teacher.submit('import-form');
+    await waitFor(() => teacher.d.querySelector('#import-result'), '导入核对名单');
+    const ids = () => [...teacher.d.querySelectorAll('#student-list tbody tr td:nth-child(2)')].map(n => n.textContent);
+    assert.deepEqual(ids(), ['00123', '00124', '00125']);
+    attach('学号,姓名\n00999,王明');
+    teacher.fill('studentSearch', '张宁'); assert.deepEqual(ids(), ['00123', '00124']);
+    assert.equal(teacher.d.querySelector('#student-count').textContent, '2 / 3 人');
+    assert.equal(teacher.d.querySelector('[name="rosterFile"]').files[0].name, '名单.csv');
+    teacher.fill('studentSearch', '00123'); assert.deepEqual(ids(), ['00123']);
+    teacher.fill('studentSearch', '  张宁  '); assert.deepEqual(ids(), ['00123', '00124']);
+    teacher.fill('studentSearch', '<b>张宁</b>'); assert.equal(teacher.d.querySelector('#student-list b'), null);
+    assert.ok(teacher.d.querySelector('#student-list').textContent.includes('没有找到匹配'));
+    teacher.click('[data-action="clear-search"]'); assert.deepEqual(ids(), ['00123', '00124', '00125']);
+    teacher.fill('studentSearch', '没有这个人'); teacher.submit('import-form');
+    await waitFor(() => teacher.d.querySelector('#student-count')?.textContent === '4 / 4 人', '导入后显示全班便于核对');
+    assert.equal(teacher.d.querySelector('[name="studentSearch"]').value, ''); assert.deepEqual(ids(), ['00123', '00124', '00125', '00999']);
+    teacher.fill('studentSearch', '张宁');
+    const select = teacher.d.querySelector('[name="currentClass"]'); select.value = '2'; select.dispatchEvent(new teacher.w.Event('change', { bubbles: true }));
+    await waitFor(() => teacher.d.querySelector('[name="currentClass"]')?.value === '2' && !teacher.d.querySelector('.loading'), '搜索时换班');
+    assert.equal(teacher.d.querySelector('[name="studentSearch"]').value, '张宁'); assert.deepEqual(ids(), ['10223']);
+    assert.equal(teacher.d.querySelector('#student-count').textContent, '1 / 2 人');
+    teacher.click('[data-action="clear-search"]'); assert.deepEqual(ids(), ['10223', '10224']);
+    assert.equal(teacher.d.querySelector('#student-count').textContent, '2 / 2 人');
+  });
+});
+
 test('班级页面建班分配学生、同卷发布和切班成绩互不混入', async () => {
   await withPages(async ({ app, page, login }) => {
     const teacher = await page(); await login(teacher, 'teacher', 'Teacher123!'); teacher.click('a[href="#/students"]');

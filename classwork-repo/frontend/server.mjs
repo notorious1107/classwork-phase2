@@ -5,7 +5,8 @@ import { fileURLToPath } from 'node:url';
 export function createWebServer({ apiPort = 3001 } = {}) {
   const assets = { '/': ['index.html', 'text/html; charset=utf-8'],
     '/app.mjs': ['app.mjs', 'text/javascript; charset=utf-8'],
-    '/style.css': ['style.css', 'text/css; charset=utf-8'] };
+    '/style.css': ['style.css', 'text/css; charset=utf-8'],
+    '/student-roster-template.xlsx': ['student-roster-template.xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'] };
   return createServer(async (req, res) => {
     if (req.url.startsWith('/api/')) {
       const upstream = request({ hostname: '127.0.0.1', port: apiPort, path: req.url,

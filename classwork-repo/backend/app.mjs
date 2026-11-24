@@ -2,6 +2,7 @@ import { createServer } from 'node:http';
 import { createHash, randomBytes } from 'node:crypto';
 import { openStore, hashPassword, verifyPassword, publishAssignment, solution, formatExpression, inferCategory, categories, questionCounts } from './store.mjs';
 import { mixedOptions, practiceOptions } from './questions.mjs';
+import { parseRoster, importRoster, rosterMaxBytes } from './roster.mjs';
 
 class HttpError extends Error {
   constructor(status, message) { super(message); this.status = status; }
@@ -11,12 +12,12 @@ const safeUser = u => ({ id: u.id, username: u.username, name: u.name, role: u.r
 const digest = token => createHash('sha256').update(token).digest('hex');
 const cookie = (value, age) => `classwork_session=${value}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${age}`;
 
-async function body(req) {
+async function body(req, maxBytes = 16_384) {
   if (!req.headers['content-type']?.startsWith('application/json')) fail(415, '请使用 JSON 请求');
   let data = '';
   for await (const chunk of req) {
     data += chunk;
-    if (Buffer.byteLength(data) > 16_384) fail(413, '请求内容过大');
+    if (Buffer.byteLength(data) > maxBytes) fail(413, '请求内容过大');
   }
   try {
     const parsed = JSON.parse(data);
@@ -204,6 +205,16 @@ export async function createApp({ dbPath = 'data/classwork.sqlite', teacherPassw
         requireRole(user, 'teacher'); const input = await body(req), classId = validClassId(input.classId);
         const result = db.prepare("UPDATE users SET class_id=? WHERE id=? AND role='student'").run(classId, Number(studentMatch[1]));
         if (!result.changes) fail(404, '学生不存在'); return send(200, { ok: true });
+      }
+      if (path === '/api/students/import' && req.method === 'POST') {
+        requireRole(user, 'teacher');
+        const input = await body(req, Math.ceil(rosterMaxBytes * 4 / 3) + 1024);
+        const classId = validClassId(input.classId);
+        if (typeof input.content !== 'string' || !input.content.length) fail(400, '文件内容无效，请重新选择名单文件');
+        const content = Buffer.from(input.content, 'base64');
+        if (content.toString('base64') !== input.content) fail(400, '文件内容无效，请重新选择名单文件');
+        const entries = await parseRoster(input.format, content);
+        return send(200, await importRoster(db, classId, entries));
       }
       if (path === '/api/logout' && req.method === 'POST') {
         db.prepare('DELETE FROM sessions WHERE token_hash=?').run(digest(rawToken));
