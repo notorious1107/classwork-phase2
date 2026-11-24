@@ -3,6 +3,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomBytes, scrypt as scryptCallback, timingSafeEqual, randomInt } from 'node:crypto';
 import { promisify } from 'node:util';
+import { generateMixed, mixedOptions } from './questions.mjs';
 
 const scrypt = promisify(scryptCallback);
 export async function hashPassword(password) {
@@ -27,30 +28,15 @@ function binaryQuestion(op, max) {
   if (!candidates.length) return binaryQuestion(op, max);
   return { a, b: candidates[randomInt(candidates.length)], op };
 }
-export function generateQuestions(category = 'add-sub-20', questionCount = 10) {
+export function generateQuestions(category = 'add-sub-20', questionCount = 10, options) {
   if (!categories.includes(category) || !questionCounts.includes(questionCount)) throw new Error('无效的作业题型或题量');
+  if (category === 'mixed-100') return generateMixed(questionCount, options);
   const questions = [];
   const used = new Set();
   while (questions.length < questionCount) {
     let q;
-    if (category === 'mixed-100') {
-      const ops = ['+', '-', '*', '/'];
-      const inner = binaryQuestion(ops[questions.length % 4], 100);
-      const op = ops[(questions.length + 1) % 4];
-      const right = randomInt(2) === 1;
-      const value = solution(inner);
-      const candidates = Array.from({ length: 101 }, (_, n) => n).filter(n => {
-        const a = right ? n : value, b = right ? value : n;
-        const result = operators[op].apply(a, b);
-        return (op !== '/' || b !== 0) && Number.isInteger(result) && result >= 0 && result <= 100;
-      });
-      if (!candidates.length) continue;
-      const n = candidates[randomInt(candidates.length)];
-      q = { a: right ? n : inner, b: right ? inner : n, op };
-    } else {
-      const ops = category === 'add-sub-20' ? ['+', '-'] : ['*', '/'];
-      q = binaryQuestion(ops[questions.length % 2], 20);
-    }
+    const ops = category === 'add-sub-20' ? ['+', '-'] : ['*', '/'];
+    q = binaryQuestion(ops[questions.length % 2], 20);
     const key = JSON.stringify(q);
     if (used.has(key)) continue;
     used.add(key);
@@ -59,10 +45,19 @@ export function generateQuestions(category = 'add-sub-20', questionCount = 10) {
   return questions;
 }
 
-export function publishAssignment(db, title, { category = 'add-sub-20', questionCount = 10, dueAt = null } = {}) {
-  const result = db.prepare('INSERT INTO assignments(title,questions,created_at,category,due_at) VALUES(?,?,?,?,?)')
-    .run(title, JSON.stringify(generateQuestions(category, questionCount)), new Date().toISOString(), category, dueAt);
-  return Number(result.lastInsertRowid);
+export function publishAssignment(db, title, { category = 'add-sub-20', questionCount = 10, dueAt = null, timeLimitMinutes = null, classIds = [1], ...input } = {}) {
+  const options = category === 'mixed-100' ? mixedOptions(input) : null;
+  const questions = JSON.stringify(generateQuestions(category, questionCount, options));
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const result = db.prepare(`INSERT INTO assignments(title,questions,created_at,category,due_at,time_limit_minutes,question_count,difficulty,mixed_grade,knowledge_points)
+    VALUES(?,?,?,?,?,?,?,?,?,?)`)
+    .run(title, questions, new Date().toISOString(), category, dueAt, timeLimitMinutes,
+      questionCount, options?.difficulty ?? null, options?.grade ?? null, options ? JSON.stringify(options.knowledgePoints) : null);
+    const id = Number(result.lastInsertRowid);
+    for (const classId of classIds) db.prepare('INSERT INTO assignment_classes(assignment_id,class_id) VALUES(?,?)').run(id, classId);
+    db.exec('COMMIT'); return id;
+  } catch (e) { db.exec('ROLLBACK'); throw e; }
 }
 
 const operators = {
@@ -129,6 +124,33 @@ export async function openStore(path, teacherPassword = 'Teacher123!') {
   if (!db.prepare("SELECT 1 FROM pragma_table_info('assignments') WHERE name='due_at'").get()) {
     db.exec('ALTER TABLE assignments ADD COLUMN due_at TEXT');
   }
+  if (!db.prepare("SELECT 1 FROM pragma_table_info('assignments') WHERE name='time_limit_minutes'").get()) {
+    db.exec('ALTER TABLE assignments ADD COLUMN time_limit_minutes INTEGER');
+  }
+  for (const [name, type] of [['question_count', 'INTEGER'], ['difficulty', 'TEXT'], ['mixed_grade', 'INTEGER'], ['knowledge_points', 'TEXT']]) {
+    if (!db.prepare("SELECT 1 FROM pragma_table_info('assignments') WHERE name=?").get(name)) db.exec(`ALTER TABLE assignments ADD COLUMN ${name} ${type}`);
+  }
+  db.exec(`CREATE TABLE IF NOT EXISTS assignment_starts (
+    assignment_id INTEGER NOT NULL REFERENCES assignments(id), student_id INTEGER NOT NULL REFERENCES users(id),
+    started_at TEXT NOT NULL, PRIMARY KEY(assignment_id,student_id)
+  )`);
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const migratingClass = !db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='assignment_classes'").get();
+    db.exec(`CREATE TABLE IF NOT EXISTS classes(id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE);
+      INSERT OR IGNORE INTO classes(id,name) VALUES(1,'原班级');`);
+    if (!db.prepare("SELECT 1 FROM pragma_table_info('users') WHERE name='class_id'").get()) db.exec('ALTER TABLE users ADD COLUMN class_id INTEGER REFERENCES classes(id)');
+    db.exec(`UPDATE users SET class_id=1 WHERE role='student' AND class_id IS NULL;
+      CREATE TABLE IF NOT EXISTS assignment_classes(
+        assignment_id INTEGER NOT NULL REFERENCES assignments(id), class_id INTEGER NOT NULL REFERENCES classes(id), PRIMARY KEY(assignment_id,class_id)
+      );
+      CREATE TABLE IF NOT EXISTS legacy_assignment_students(
+        assignment_id INTEGER NOT NULL REFERENCES assignments(id), student_id INTEGER NOT NULL REFERENCES users(id), PRIMARY KEY(assignment_id,student_id)
+      );`);
+    if (migratingClass) db.exec(`INSERT INTO assignment_classes SELECT id,1 FROM assignments;
+      INSERT INTO legacy_assignment_students SELECT a.id,u.id FROM assignments a CROSS JOIN users u WHERE u.role='student';`);
+    db.exec('COMMIT');
+  } catch (e) { db.exec('ROLLBACK'); throw e; }
   if (!db.prepare("SELECT id FROM users WHERE role='teacher'").get()) {
     db.prepare('INSERT INTO users(username,name,password_hash,role) VALUES(?,?,?,?)')
       .run('teacher', '数学老师', await hashPassword(teacherPassword), 'teacher');

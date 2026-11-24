@@ -1,12 +1,13 @@
 import { createServer } from 'node:http';
 import { createHash, randomBytes } from 'node:crypto';
 import { openStore, hashPassword, verifyPassword, publishAssignment, solution, formatExpression, inferCategory, categories, questionCounts } from './store.mjs';
+import { mixedOptions, practiceOptions } from './questions.mjs';
 
 class HttpError extends Error {
   constructor(status, message) { super(message); this.status = status; }
 }
 const fail = (status, message) => { throw new HttpError(status, message); };
-const safeUser = u => ({ id: u.id, username: u.username, name: u.name, role: u.role });
+const safeUser = u => ({ id: u.id, username: u.username, name: u.name, role: u.role, classId: u.role === 'student' ? u.class_id ?? 1 : null });
 const digest = token => createHash('sha256').update(token).digest('hex');
 const cookie = (value, age) => `classwork_session=${value}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${age}`;
 
@@ -60,6 +61,9 @@ function readAssignment(row) {
   const category = row.category ?? inferCategory(questions);
   return {
     id: row.id, title: row.title, createdAt: row.created_at, category, questionCount: questions.length, dueAt: row.due_at ?? null,
+    timeLimitMinutes: row.time_limit_minutes ?? null,
+    difficulty: row.difficulty ?? null, grade: row.mixed_grade ?? null, knowledgePoints: row.knowledge_points ? JSON.parse(row.knowledge_points) : [],
+    knowledgePointNames: row.knowledge_points ? JSON.parse(row.knowledge_points).map(id => practiceOptions.topics.find(t => t.id === id)?.name ?? id) : [],
     answerMax: category === 'mixed-100' ? 100 : 20,
     questions, expressions: questions.map(q => formatExpression(q))
   };
@@ -72,31 +76,61 @@ export async function createApp({ dbPath = 'data/classwork.sqlite', teacherPassw
   function requireRole(user, role) {
     if (user.role !== role) fail(403, '当前账号无权执行此操作');
   }
+  function validClassId(value) {
+    if (!Number.isInteger(value) || !db.prepare('SELECT id FROM classes WHERE id=?').get(value)) fail(400, '请选择有效班级');
+    return value;
+  }
+  function classFilter(url) {
+    return url.searchParams.has('classId') ? validClassId(Number(url.searchParams.get('classId'))) : null;
+  }
+  function withClasses(row) {
+    const classes = db.prepare('SELECT c.id,c.name FROM classes c JOIN assignment_classes ac ON ac.class_id=c.id WHERE ac.assignment_id=? ORDER BY c.id').all(row.id);
+    return { ...readAssignment(row), classes, classIds: classes.map(c => c.id) };
+  }
+  function canAccess(a, user) {
+    return a.classIds.includes(user.class_id ?? 1) || !!db.prepare('SELECT 1 FROM legacy_assignment_students WHERE assignment_id=? AND student_id=?').get(a.id, user.id);
+  }
+  function requireAccess(a, user) { if (user.role === 'student' && !canAccess(a, user)) fail(404, '作业不存在'); }
+  function currentStudent(user) { return db.prepare('SELECT * FROM users WHERE id=?').get(user.id); }
   function assignment(id) {
     const row = db.prepare('SELECT * FROM assignments WHERE id=?').get(id);
     if (!row) fail(404, '作业不存在');
-    return readAssignment(row);
+    return withClasses(row);
   }
   function studentView(a, studentId) {
     const s = db.prepare('SELECT * FROM submissions WHERE assignment_id=? AND student_id=?').get(a.id, studentId);
-    const result = { ...a, isClosed: isClosed(a),
+    const start = db.prepare('SELECT started_at FROM assignment_starts WHERE assignment_id=? AND student_id=?').get(a.id, studentId);
+    const personalDue = a.timeLimitMinutes && start ? Date.parse(start.started_at) + a.timeLimitMinutes * 60_000 : null;
+    const deadlines = [a.dueAt && Date.parse(a.dueAt), personalDue].filter(v => v !== null && v !== false);
+    const effectiveDueAt = deadlines.length ? new Date(Math.min(...deadlines)).toISOString() : null;
+    const result = { ...a, startedAt: start?.started_at ?? null, effectiveDueAt,
+      isClosed: effectiveDueAt !== null && clock() >= Date.parse(effectiveDueAt),
       answers: s ? JSON.parse(s.answers) : Array(a.questionCount).fill(null), savedAt: s?.saved_at ?? null,
       submittedAt: s?.submitted_at ?? null, score: s?.score ?? null };
+    if (a.timeLimitMinutes) result.serverNow = new Date(clock()).toISOString();
+    if (a.timeLimitMinutes && !start && !s?.submitted_at) {
+      result.questions = []; result.expressions = []; result.answers = [];
+    }
     if (s?.submitted_at) result.results = a.questions.map((q, i) => {
       const correctAnswer = solution(q);
       return { correctAnswer, correct: result.answers[i] === correctAnswer };
     });
     return result;
   }
-  function report(a) {
+  function report(a, classId = null) {
+    if (classId !== null && !a.classIds.includes(classId)) fail(404, '这份作业未发布给该班级');
+    const selected = classId === null ? a.classIds : [classId];
+    const placeholders = selected.map(() => '?').join(',');
     const students = db.prepare(`SELECT u.id,u.username,u.name,s.submitted_at,s.saved_at,s.score
       FROM users u LEFT JOIN submissions s ON s.student_id=u.id AND s.assignment_id=?
-      WHERE u.role='student' ORDER BY u.id`).all(a.id).map(s => ({
+      WHERE u.role='student' AND (COALESCE(u.class_id,1) IN (${placeholders}) OR
+        (? AND EXISTS(SELECT 1 FROM legacy_assignment_students l WHERE l.assignment_id=? AND l.student_id=u.id))) ORDER BY u.id`)
+      .all(a.id, ...selected, selected.includes(1) ? 1 : 0, a.id).map(s => ({
         id: s.id, username: s.username, name: s.name,
         submittedAt: s.submitted_at ?? null, savedAt: s.saved_at ?? null, score: s.score ?? null
       }));
     const submitted = students.filter(s => s.submittedAt);
-    return { ...a, isClosed: isClosed(a),
+    return { ...a, reportClassId: classId, isClosed: isClosed(a),
       students, total: students.length, submitted: submitted.length,
       pending: students.length - submitted.length,
       average: submitted.length ? Math.round(submitted.reduce((sum, s) => sum + s.score, 0) / submitted.length * 10) / 10 : null };
@@ -145,23 +179,54 @@ export async function createApp({ dbPath = 'data/classwork.sqlite', teacherPassw
         WHERE s.token_hash=? AND s.expires>?`).get(digest(rawToken), Date.now());
       if (!user) fail(401, '请先登录');
       if (path === '/api/me' && req.method === 'GET') return send(200, safeUser(user));
+      if (path === '/api/practice-options' && req.method === 'GET') { requireRole(user, 'teacher'); return send(200, practiceOptions); }
+      if (path === '/api/classes') {
+        requireRole(user, 'teacher');
+        if (req.method === 'GET') return send(200, db.prepare('SELECT id,name FROM classes ORDER BY id').all());
+        if (req.method === 'POST') {
+          const input = await body(req), name = textField(input.name, '班级名称', 1, 30);
+          try {
+            const result = db.prepare('INSERT INTO classes(name) VALUES(?)').run(name);
+            return send(201, { id: Number(result.lastInsertRowid), name });
+          } catch (e) { if (String(e.message).includes('UNIQUE')) fail(409, '班级名称已存在'); throw e; }
+        }
+      }
+      const classMatch = path.match(/^\/api\/classes\/([1-9]\d*)$/);
+      if (classMatch && req.method === 'PUT') {
+        requireRole(user, 'teacher'); const id = validClassId(Number(classMatch[1]));
+        const input = await body(req), name = textField(input.name, '班级名称', 1, 30);
+        try { db.prepare('UPDATE classes SET name=? WHERE id=?').run(name, id); }
+        catch (e) { if (String(e.message).includes('UNIQUE')) fail(409, '班级名称已存在'); throw e; }
+        return send(200, { id, name });
+      }
+      const studentMatch = path.match(/^\/api\/students\/([1-9]\d*)$/);
+      if (studentMatch && req.method === 'PUT') {
+        requireRole(user, 'teacher'); const input = await body(req), classId = validClassId(input.classId);
+        const result = db.prepare("UPDATE users SET class_id=? WHERE id=? AND role='student'").run(classId, Number(studentMatch[1]));
+        if (!result.changes) fail(404, '学生不存在'); return send(200, { ok: true });
+      }
       if (path === '/api/logout' && req.method === 'POST') {
         db.prepare('DELETE FROM sessions WHERE token_hash=?').run(digest(rawToken));
         return send(200, { ok: true }, { 'Set-Cookie': cookie('', 0) });
       }
       if (path === '/api/students') {
         requireRole(user, 'teacher');
-        if (req.method === 'GET') return send(200, db.prepare("SELECT id,username,name FROM users WHERE role='student' ORDER BY id").all());
+        if (req.method === 'GET') {
+          const selected = classFilter(url);
+          return send(200, db.prepare(`SELECT id,username,name,COALESCE(class_id,1) AS classId FROM users WHERE role='student'
+            ${selected === null ? '' : 'AND COALESCE(class_id,1)=?'} ORDER BY id`).all(...(selected === null ? [] : [selected])));
+        }
         if (req.method === 'POST') {
           const input = await body(req);
           const username = textField(input.username, '账号', 3, 32);
           if (!/^[a-zA-Z0-9_-]+$/.test(username)) fail(400, '账号仅支持字母、数字、下划线和短横线');
           const name = textField(input.name, '姓名', 1, 30);
           const password = textField(input.password, '密码', 8, 128);
+          const classId = validClassId(input.classId === undefined ? 1 : input.classId);
           const hash = await hashPassword(password);
           try {
-            const result = db.prepare("INSERT INTO users(username,name,password_hash,role) VALUES(?,?,?,'student')").run(username, name, hash);
-            return send(201, { id: Number(result.lastInsertRowid), username, name });
+            const result = db.prepare("INSERT INTO users(username,name,password_hash,role,class_id) VALUES(?,?,?,'student',?)").run(username, name, hash, classId);
+            return send(201, { id: Number(result.lastInsertRowid), username, name, classId });
           } catch (e) {
             if (String(e.message).includes('UNIQUE')) fail(409, '账号已存在，请更换账号');
             throw e;
@@ -170,31 +235,52 @@ export async function createApp({ dbPath = 'data/classwork.sqlite', teacherPassw
       }
       if (path === '/api/assignments') {
         if (req.method === 'GET') {
-          const list = db.prepare('SELECT * FROM assignments ORDER BY id DESC').all().map(readAssignment);
-          return send(200, list.map(a => user.role === 'teacher' ? report(a) : studentView(a, user.id)));
+          let list = db.prepare('SELECT * FROM assignments ORDER BY id DESC').all().map(withClasses);
+          const selected = user.role === 'teacher' ? classFilter(url) : null;
+          list = list.filter(a => user.role === 'teacher' ? selected === null || a.classIds.includes(selected) : canAccess(a, user));
+          return send(200, list.map(a => user.role === 'teacher' ? report(a, selected) : studentView(a, user.id)));
         }
         if (req.method === 'POST') {
           requireRole(user, 'teacher');
           const input = await body(req);
           const title = textField(input.title, '作业名称', 1, 60);
+          const classIds = input.classIds === undefined ? [1] : input.classIds;
+          if (!Array.isArray(classIds) || !classIds.length || new Set(classIds).size !== classIds.length) fail(400, '请选择至少一个班级，不能重复');
+          classIds.forEach(validClassId);
           const category = input.category === undefined ? 'add-sub-20' : input.category;
           const questionCount = input.questionCount === undefined ? 10 : input.questionCount;
           if (!categories.includes(category)) fail(400, '请选择一种有效题型');
           if (!questionCounts.includes(questionCount)) fail(400, '题目数量请选择 10、20 或 50 道');
           const dueAt = validateDueAt(input.dueAt, clock());
-          const id = publishAssignment(db, title, { category, questionCount, dueAt });
+          const timeLimitMinutes = input.timeLimitMinutes ?? null;
+          if (timeLimitMinutes !== null && (!Number.isInteger(timeLimitMinutes) || timeLimitMinutes < 1 || timeLimitMinutes > 1440)) fail(400, '个人限时请填写 1–1440 的整数分钟，或留空');
+          let options = {};
+          if (category === 'mixed-100') {
+            try { options = mixedOptions(input); } catch (e) { fail(400, e.message); }
+          }
+          const id = publishAssignment(db, title, { category, questionCount, dueAt, timeLimitMinutes, classIds, ...options });
           return send(201, report(assignment(id)));
         }
       }
-      const match = path.match(/^\/api\/assignments\/([1-9]\d*)(?:\/(draft|submit|report))?$/);
+      const match = path.match(/^\/api\/assignments\/([1-9]\d*)(?:\/(draft|submit|report|start))?$/);
       if (match) {
         const a = assignment(Number(match[1]));
         const action = match[2];
         if (action === 'report' && req.method === 'GET') {
-          requireRole(user, 'teacher'); return send(200, report(a));
+          requireRole(user, 'teacher'); return send(200, report(a, classFilter(url)));
         }
+        requireAccess(a, user);
         if (!action && req.method === 'GET') {
-          return send(200, user.role === 'teacher' ? report(a) : studentView(a, user.id));
+          return send(200, user.role === 'teacher' ? report(a, classFilter(url)) : studentView(a, user.id));
+        }
+        if (action === 'start' && req.method === 'POST') {
+          requireRole(user, 'student'); await body(req); requireAccess(a, currentStudent(user));
+          const view = studentView(a, user.id);
+          if (view.startedAt || view.submittedAt) return send(200, view);
+          if (isClosed(a)) fail(409, '作业已截止，不能开始作答');
+          db.prepare('INSERT OR IGNORE INTO assignment_starts(assignment_id,student_id,started_at) VALUES(?,?,?)')
+            .run(a.id, user.id, new Date(clock()).toISOString());
+          return send(200, studentView(a, user.id));
         }
         if ((action === 'draft' && req.method === 'PUT') || (action === 'submit' && req.method === 'POST')) {
           requireRole(user, 'student');
@@ -204,18 +290,20 @@ export async function createApp({ dbPath = 'data/classwork.sqlite', teacherPassw
             fail(409, '作业已提交，不能再修改答案');
           }
           const input = await body(req);
+          requireAccess(a, currentStudent(user));
           // A request may wait for its body while another request submits this work.
           const latest = studentView(a, user.id);
           if (latest.submittedAt) {
             if (action === 'submit') return send(200, latest);
             fail(409, '作业已提交，不能再修改答案');
           }
+          if (a.timeLimitMinutes && !latest.startedAt) fail(400, '请先点击开始作答');
           const answers = validateAnswers(input.answers, action === 'submit', a.answerMax, a.questionCount);
           const correct = a.questions.filter((q, i) => solution(q) === answers[i]).length;
           const score = action === 'submit' ? correct * 100 / a.questionCount : null;
           const stamp = clock();
-          if (action === 'submit' && a.dueAt !== null && stamp >= Date.parse(a.dueAt)) {
-            fail(409, '作业已截止，不能再提交；仍可保存草稿，老师处计为未交');
+          if (action === 'submit' && latest.effectiveDueAt !== null && stamp >= Date.parse(latest.effectiveDueAt)) {
+            fail(409, '作业已截止或个人时间已用完，不能再提交；仍可保存草稿，老师处计为未交');
           }
           const savedAt = new Date(stamp).toISOString();
           const written = db.prepare(`INSERT INTO submissions(assignment_id,student_id,answers,saved_at,submitted_at,score)

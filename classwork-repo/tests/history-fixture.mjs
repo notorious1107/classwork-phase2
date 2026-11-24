@@ -29,8 +29,11 @@ export const studentPassword = 'FixtureStudent42';
 
 export function snapshot(db) {
   return {
-    users: db.prepare('SELECT * FROM users ORDER BY id').all(),
-    assignments: db.prepare('SELECT * FROM assignments ORDER BY id').all(),
+    users: db.prepare('SELECT * FROM users ORDER BY id').all().map(u => { u.class_id ??= u.role === 'student' ? 1 : null; return u; }),
+    assignments: db.prepare('SELECT * FROM assignments ORDER BY id').all().map(a => {
+      for (const name of ['time_limit_minutes', 'question_count', 'difficulty', 'mixed_grade', 'knowledge_points']) a[name] ??= null;
+      return a;
+    }),
     submissions: db.prepare('SELECT * FROM submissions ORDER BY assignment_id, student_id').all()
   };
 }
@@ -52,7 +55,7 @@ export async function createHistoryClass(path) {
       );
       CREATE TABLE assignments (
         id INTEGER PRIMARY KEY, title TEXT NOT NULL, questions TEXT NOT NULL, created_at TEXT NOT NULL,
-        category TEXT NOT NULL DEFAULT 'add-sub-20', due_at TEXT
+        category TEXT NOT NULL DEFAULT 'add-sub-20', due_at TEXT, difficulty TEXT, question_count INTEGER
       );
       CREATE TABLE submissions (
         assignment_id INTEGER NOT NULL REFERENCES assignments(id), student_id INTEGER NOT NULL REFERENCES users(id),
@@ -66,11 +69,11 @@ export async function createHistoryClass(path) {
     for (const id of [2, 3, 4]) {
       insertUser.run(id, `pupil${id}`, `同学${id}`, await hashPassword(studentPassword));
     }
-    const insertAssignment = db.prepare('INSERT INTO assignments(id,title,questions,created_at,category) VALUES(?,?,?,?,?)');
+    const insertAssignment = db.prepare('INSERT INTO assignments(id,title,questions,created_at,category,difficulty,question_count) VALUES(?,?,?,?,?,?,?)');
     const insertAnswers = db.prepare('INSERT INTO submissions(assignment_id,student_id,answers,saved_at,submitted_at,score) VALUES(?,?,?,?,?,?)');
     const stamp = '2026-10-01T04:00:00.000Z';
     for (const [index, a] of historyAssignments.entries()) {
-      insertAssignment.run(a.id, a.title, JSON.stringify(a.questions), stamp, a.category);
+      insertAssignment.run(a.id, a.title, JSON.stringify(a.questions), stamp, a.category, ['basic', 'advanced', null][index], 10);
       for (const id of [2, 3]) {
         const missed = index + id - 2;
         const answers = a.key.map((v, i) => i < missed ? 0 : v);

@@ -3,7 +3,7 @@ const db = await openStore(process.env.DB_PATH || 'data/classwork.sqlite', proce
 try {
   for (const [username, name] of [['student01', '小雨'], ['student02', '小明']]) {
     if (!db.prepare('SELECT id FROM users WHERE username=?').get(username)) {
-      db.prepare("INSERT INTO users(username,name,password_hash,role) VALUES(?,?,?,'student')")
+      db.prepare("INSERT INTO users(username,name,password_hash,role,class_id) VALUES(?,?,?,'student',1)")
         .run(username, name, await hashPassword('Student123!'));
       console.log(`已创建 ${name}：${username} / Student123!`);
     } else console.log(`${username} 已存在，保留原数据与密码。`);
