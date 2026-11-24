@@ -10,6 +10,7 @@ import { solution, publishAssignment } from '../backend/store.mjs';
 import { createHistoryClass, historyAssignments, studentPassword, teacherPassword } from './history-fixture.mjs';
 import { seedCorrections } from './correction-fixture.mjs';
 import { legacyPreviewClass, legacyPreviewSchemas } from './preview-fixture.mjs';
+import { seedAnalytics } from './analytics-fixture.mjs';
 
 const html = await readFile(new URL('../frontend/index.html', import.meta.url), 'utf8');
 const source = await readFile(new URL('../frontend/app.mjs', import.meta.url), 'utf8');
@@ -689,6 +690,85 @@ test('月历断网重试、错误月份和日期、延迟响应不会串班', as
     assert.equal(teacher.d.querySelector(`[data-calendar-assignment="${ids.shared}"] .card-stats div:last-child strong`).textContent, '100');
     assert.equal(teacher.d.querySelector(`[data-calendar-assignment="${ids.pending}"]`), null);
   }, undefined, { clock: () => Date.parse('2026-11-24T08:00:00Z') });
+});
+
+test('教师班级学情的加权均分、常错题、逐人原答案、原卷往返和换班范围', async () => {
+  await withPages(async ({ app, page, login }) => {
+    const {a,ids} = seedAnalytics(app.db); let teacher = await page(); await login(teacher,'teacher','Teacher123!');
+    teacher.click('nav a[href="#/analytics"]'); await waitFor(()=>teacher.d.querySelector('#analytics-filter-form'),'学情入口');
+    assert.equal(teacher.d.querySelector('[name="from"]').value,'2026-11-18');
+    assert.equal(teacher.d.querySelector('[name="to"]').value,'2026-11-24');
+    teacher.fill('from','2026-11-17'); teacher.fill('to','2026-11-19'); teacher.submit('analytics-filter-form');
+    const metrics = () => [...teacher.d.querySelectorAll('.analytics-summary strong')].map(n=>n.textContent);
+    await waitFor(()=>metrics().join(',')==='2,3,5,80','80/100/60 逐份均分');
+    assert.equal(teacher.d.querySelector('nav [aria-current="page"]').textContent,'班级学情');
+    assert.equal(teacher.d.querySelectorAll('.analytics-question').length,6);
+    assert.ok(teacher.d.querySelector(`[data-analytics-question="${a}:1"]`).textContent.includes('周二练习 <A>'));
+    assert.equal(teacher.d.querySelector('.analytics-question A'),null);
+    teacher.click(`[data-analytics-question="${a}:1"]`); await waitFor(()=>teacher.d.querySelector('#analytics-detail'),'逐人原答案');
+    assert.equal(teacher.d.querySelector('#analytics-detail .analytics-expression').textContent,'8 − 8 ＝ 0');
+    const row = id => teacher.d.querySelector(`[data-analytics-student="${id}"]`);
+    assert.equal(row(ids.nan).children[2].textContent,'0');
+    assert.ok(row(ids.draft).textContent.includes('未交、未评分'));assert.equal(row(ids.draft).children[2].textContent,'草稿：0');
+    assert.equal(row(ids.blank).children[2].textContent,'未保存答案');assert.equal(row(ids.zhou),null);
+    teacher.click('[name="analyticsAll"]');assert.equal(teacher.d.querySelectorAll('.analytics-question').length,20);
+    const detailHash=teacher.w.location.hash;
+    teacher.w.close();teacher=await page(teacher.session,detailHash);
+    assert.equal(teacher.d.querySelectorAll('.analytics-question').length,20);assert.ok(teacher.d.querySelector('[name="analyticsAll"]').checked);
+    teacher.click(`[data-analytics-student="${ids.lin}"] .student-name`); await waitFor(()=>teacher.d.querySelector('.review-summary'),'学情到原卷');
+    assert.equal(teacher.d.querySelector('.review-total strong').textContent,'80');assert.equal(teacher.d.querySelector('.back-link').textContent,'← 返回班级学情');
+    teacher.click('.back-link');await waitFor(()=>teacher.d.querySelector('#analytics-detail'),'返回保留范围及题号');
+    assert.equal(teacher.w.location.hash,detailHash);
+    teacher.click(`[data-analytics-question="${a}:2"]`);await waitFor(()=>teacher.d.querySelector('#analytics-detail h2')?.textContent.startsWith('第 2 题'),'已交漏答');
+    assert.equal(row(ids.lin).children[1].textContent,'漏答');assert.equal(row(ids.lin).children[2].textContent,'未填');
+    const chooser=teacher.d.querySelector('[name="currentClass"]');chooser.value='2';chooser.dispatchEvent(new teacher.w.Event('change',{bubbles:true}));
+    await waitFor(()=>metrics().join(',')==='1,1,0,40','切班独立均分');
+    assert.equal(teacher.d.querySelector('#analytics-detail'),null);assert.equal(teacher.d.querySelector('[name="from"]').value,'2026-11-17');
+    assert.ok(!teacher.w.location.hash.includes('assignmentId='));
+    teacher.click(`[data-analytics-question="${a}:1"]`);await waitFor(()=>teacher.d.querySelector('#analytics-detail'),'二班原答案');
+    assert.deepEqual([...teacher.d.querySelectorAll('[data-analytics-student]')].map(n=>n.dataset.analyticsStudent),[String(ids.zhou)]);
+    teacher.fill('from','2026-11-20');teacher.fill('to','2026-11-19');teacher.submit('analytics-filter-form');
+    assert.ok(teacher.d.querySelector('#analytics-error').textContent.includes('开始日期不能晚于结束日期'));
+    teacher.fill('from','2026-12-01');teacher.fill('to','2026-12-01');teacher.submit('analytics-filter-form');
+    await waitFor(()=>metrics().join(',')==='0,0,0,暂无均分','无练习范围');
+    assert.ok(teacher.d.querySelector('#analytics-question-list').textContent.includes('当前范围没有练习'));
+    teacher.click('#analytics-filter-form a');await waitFor(()=>metrics().join(',')==='1,1,0,40','清空日期全部历史');
+    assert.equal(teacher.d.querySelector('[name="from"]').value,'');assert.equal(teacher.d.querySelector('[name="to"]').value,'');
+    const student=await page();await login(student,'lin','Teacher123!');assert.equal(student.d.querySelector('nav a[href="#/analytics"]'),null);
+  },undefined,{clock:()=>Date.parse('2026-11-23T16:05:00Z')});
+});
+
+test('学情无人提交与零分展示、断网重试、无效题号和延迟响应不串班',async()=>{
+  await withPages(async({app,page,login})=>{
+    const {a,ids}=seedAnalytics(app.db), pending=publishAssignment(app.db,'无人交',{classIds:[1]});
+    app.db.prepare('UPDATE assignments SET created_at=? WHERE id=?').run('2026-12-01T00:00:00Z',pending);
+    const teacher=await page();await login(teacher,'teacher','Teacher123!');
+    const route = id => `#/analytics?classId=${id}&from=2026-11-17&to=2026-11-19`;
+    teacher.w.location.hash='#/analytics?classId=1&from=2026-12-01&to=2026-12-01';
+    await waitFor(()=>teacher.d.querySelector('.analytics-summary'),'无人提交范围');
+    assert.equal(teacher.d.querySelector('.analytics-summary>div:last-child strong').textContent,'暂无均分');
+    teacher.click('[name="analyticsAll"]');assert.equal(teacher.d.querySelectorAll('.analytics-question').length,10);
+    assert.ok(teacher.d.querySelector('.analytics-counts>div:last-child').textContent.includes('4 人'));
+    app.db.prepare('INSERT INTO submissions VALUES(?,?,?,?,?,?)').run(pending,ids.lin,JSON.stringify(Array(10).fill(0)),'2026-12-02T00:00:00Z','2026-12-02T00:00:00Z',0);
+    teacher.click('[data-action="refresh"]');await waitFor(()=>teacher.d.querySelector('.analytics-summary>div:last-child strong')?.textContent==='0','实际均分零');
+    teacher.session.failPath='/analytics?';teacher.click('[data-action="refresh"]');await waitFor(()=>teacher.d.querySelector('.empty h2')?.textContent.includes('暂时没有打开'),'断网');
+    assert.equal(teacher.d.querySelector('.analytics-summary'),null);
+    teacher.session.failPath='';teacher.click('[data-action="refresh"]');await waitFor(()=>teacher.d.querySelector('.analytics-summary'),'重试');
+    teacher.w.location.hash=route(1)+`&assignmentId=${a}&questionNumber=11`;
+    await waitFor(()=>teacher.d.querySelector('.empty p')?.textContent.includes('没有这道题'),'无效题号');
+    teacher.w.location.hash=route(2);await waitFor(()=>teacher.d.querySelector('.analytics-heading h2')?.textContent.startsWith('二班'),'进入二班');
+    let release,received,parsed;
+    const gate=new Promise(r=>{release=r;}),started=new Promise(r=>{received=r;}),completed=new Promise(r=>{parsed=r;});
+    const original=teacher.w.fetch;
+    teacher.w.fetch=async(path,options)=>{
+      const response=await original(path,options);if(!String(path).includes('/analytics?classId=1&'))return response;
+      received();await gate;return{ok:response.ok,status:response.status,json:async()=>{const value=await response.json();parsed();return value;}};
+    };
+    teacher.w.location.hash=route(1);await started;teacher.w.location.hash=route(2);
+    await waitFor(()=>teacher.d.querySelector('.analytics-heading h2')?.textContent.startsWith('二班'),'新班先完成');release();await completed;await new Promise(r=>setImmediate(r));
+    assert.equal(teacher.d.querySelector('[name="currentClass"]').value,'2');
+    assert.equal(teacher.d.querySelector('.analytics-summary>div:last-child strong').textContent,'40');
+  });
 });
 
 test('名单文件上传、逐行反馈、刷新名单与前导零账号登录', async () => {

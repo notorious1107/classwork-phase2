@@ -6,6 +6,8 @@ import { paperOptions } from './papers.mjs';
 import { readPreview, createPreview, publishPreview } from './previews.mjs';
 import { parseRoster, importRoster, rosterMaxBytes } from './roster.mjs';
 import { calendarMonth, beijingDateKey } from './calendar.mjs';
+import { assignmentStudents } from './reporting.mjs';
+import { analyticsFilters, analyticsSelection, aggregatePractice } from './analytics.mjs';
 import { historyFilters, matchesTopic, submissionStatus } from './records.mjs';
 import { mistakeBook, mistakeSource, correctionQuestion, correctionHistory, submitCorrection } from './corrections.mjs';
 
@@ -136,17 +138,7 @@ export async function createApp({ dbPath = 'data/classwork.sqlite', teacherPassw
     return result;
   }
   function report(a, classId = null) {
-    if (classId !== null && !a.classIds.includes(classId)) fail(404, '这份作业未发布给该班级');
-    const selected = classId === null ? a.classIds : [classId];
-    const placeholders = selected.map(() => '?').join(',');
-    const students = db.prepare(`SELECT u.id,u.username,u.name,s.submitted_at,s.saved_at,s.score
-      FROM users u LEFT JOIN submissions s ON s.student_id=u.id AND s.assignment_id=?
-      WHERE u.role='student' AND (COALESCE(u.class_id,1) IN (${placeholders}) OR
-        (? AND EXISTS(SELECT 1 FROM legacy_assignment_students l WHERE l.assignment_id=? AND l.student_id=u.id))) ORDER BY u.id`)
-      .all(a.id, ...selected, selected.includes(1) ? 1 : 0, a.id).map(s => ({
-        id: s.id, username: s.username, name: s.name,
-        submittedAt: s.submitted_at ?? null, savedAt: s.saved_at ?? null, score: s.score ?? null
-      }));
+    const students = assignmentStudents(db, a, classId);
     const submitted = students.filter(s => s.submittedAt);
     return { ...a, reportClassId: classId, isClosed: isClosed(a),
       students, total: students.length, submitted: submitted.length,
@@ -272,6 +264,19 @@ export async function createApp({ dbPath = 'data/classwork.sqlite', teacherPassw
       if (reviewMatch && req.method === 'GET') {
         requireRole(user, 'teacher');
         return send(200, review(assignment(Number(reviewMatch[1])), Number(reviewMatch[2]), classFilter(url)));
+      }
+      if (path === '/api/analytics' && req.method === 'GET') {
+        requireRole(user, 'teacher');
+        const classId = classFilter(url);
+        if (classId === null) fail(400, '请先选择班级');
+        const filters = analyticsFilters(url, clock()), selection = analyticsSelection(url);
+        const rows = db.prepare(`SELECT a.* FROM assignments a JOIN assignment_classes ac ON ac.assignment_id=a.id
+          WHERE ac.class_id=? AND (?='' OR julianday(a.created_at)>=julianday(?))
+          AND (?='' OR julianday(a.created_at)<julianday(?)+1)
+          ORDER BY julianday(a.created_at) DESC,a.id DESC`).all(classId, filters.from, `${filters.from}T00:00:00+08:00`, filters.to, `${filters.to}T00:00:00+08:00`);
+        const papers = rows.map(row => { const a = withClasses(row); return { assignment: a, students: assignmentStudents(db, a, classId, true) }; });
+        return send(200, { classId, className: db.prepare('SELECT name FROM classes WHERE id=?').get(classId).name,
+          filters, timeZone: 'Asia/Shanghai', ...aggregatePractice(papers, selection) });
       }
       if (path === '/api/calendar' && req.method === 'GET') {
         requireRole(user, 'teacher');
