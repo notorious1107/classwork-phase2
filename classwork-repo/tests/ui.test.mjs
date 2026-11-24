@@ -8,6 +8,7 @@ import { createApp } from '../backend/app.mjs';
 import { createWebServer } from '../frontend/server.mjs';
 import { solution, publishAssignment } from '../backend/store.mjs';
 import { createHistoryClass, historyAssignments, studentPassword, teacherPassword } from './history-fixture.mjs';
+import { seedCorrections } from './correction-fixture.mjs';
 
 const html = await readFile(new URL('../frontend/index.html', import.meta.url), 'utf8');
 const source = await readFile(new URL('../frontend/app.mjs', import.meta.url), 'utf8');
@@ -262,6 +263,95 @@ test('北京时间发布、页面到点保留答案、逾期存草稿和已交�
     assert.ok(resumed.d.querySelector('.badge').textContent.includes('已截止'));
     assert.ok(resumed.d.querySelector('.page-title p').textContent.includes('已截止未交'));
   }, undefined, { clock: () => currentTime });
+});
+
+test('学生错题本跨作业归集，独立订正先隐答案、逐步反馈、重复练习并回看原卷', async () => {
+  await withPages(async ({ app, page, login }) => {
+    const ids = seedCorrections(app.db), pupil = await page(); await login(pupil, 'learner', 'Teacher123!');
+    const before = app.db.prepare('SELECT * FROM submissions ORDER BY assignment_id,student_id').all();
+    pupil.click('nav a[href="#/mistakes"]'); await waitFor(() => pupil.d.querySelectorAll('.mistake-card').length === 6, '六道首次交卷错题');
+    assert.equal(pupil.d.querySelector('nav a[href="#/mistakes"]').getAttribute('aria-current'), 'page');
+    assert.equal(pupil.d.querySelector('.mistake-card').dataset.mistake, `${ids.second}:1`);
+    assert.equal(pupil.d.querySelector('.mistake-origin b'), null);
+    assert.equal(pupil.d.querySelector(`[data-mistake="${ids.shared}:4"]`), null);
+    pupil.click(`[data-mistake="${ids.shared}:2"] .mistake-origin`);
+    await waitFor(() => pupil.d.querySelector('.source-question'), '回原卷并标出第2题');
+    assert.equal(pupil.d.querySelector('.source-question').dataset.originalQuestion, '2');
+    assert.equal(pupil.d.querySelector('#answer-1').value, '5'); assert.equal(pupil.d.querySelector('#answer-1').matches(':disabled'), true);
+    assert.equal(pupil.d.querySelector('.score-stamp strong').textContent, '60');
+    pupil.click('.back-link'); await waitFor(() => pupil.d.querySelector('.mistake-card'), '回错题本');
+    pupil.click(`[data-mistake="${ids.shared}:1"] a.button`); await waitFor(() => pupil.d.querySelector('#correction-form'), '独立订正');
+    assert.equal(pupil.d.querySelector('[name="correctionAnswer"]').value, '');
+    assert.equal(pupil.d.querySelector('.correction-explanation,.correction-result,.attempts-table'), null);
+    assert.ok(pupil.d.querySelector('.correction-expression').textContent.includes('(36 − 12) ÷ 4 ＋ 7'));
+    pupil.fill('correctionAnswer', 0); pupil.submit('correction-form');
+    await waitFor(() => pupil.d.querySelector('.correction-result.wrong'), '第一次订正答错');
+    assert.equal(pupil.d.querySelectorAll('.correction-explanation li').length, 3);
+    assert.deepEqual([...pupil.d.querySelectorAll('.correction-explanation li small')].map(el => el.textContent), ['36 − 12 ＝ 24', '24 ÷ 4 ＝ 6', '6 ＋ 7 ＝ 13']);
+    assert.ok(pupil.d.querySelector('.attempts-table tbody').textContent.includes('第 1 次0'));
+    pupil.click('[data-action="retry-correction"]');
+    assert.equal(pupil.d.querySelector('[name="correctionAnswer"]').value, ''); assert.equal(pupil.d.querySelector('.correction-explanation,.correction-result,.attempts-table'), null);
+    pupil.fill('correctionAnswer', 13); pupil.submit('correction-form'); await waitFor(() => pupil.d.querySelector('.correction-result.right'), '第二次做对');
+    assert.ok(pupil.d.querySelector('.correction-result').textContent.includes('第 2 次'));
+    pupil.click('[data-action="retry-correction"]'); pupil.fill('correctionAnswer', 12); pupil.submit('correction-form');
+    await waitFor(() => pupil.d.querySelector('.correction-result.wrong')?.textContent.includes('第 3 次'), '第三次再练');
+    pupil.click('.back-link'); await waitFor(() => pupil.d.querySelector(`[data-mistake="${ids.shared}:1"]`), '带订正进度回错题本');
+    const card = () => pupil.d.querySelector(`[data-mistake="${ids.shared}:1"]`);
+    assert.ok(card().textContent.includes('已订正 3 次 · 第 2 次首次做对')); assert.ok(card().textContent.includes('继续订正'));
+    pupil.click(`[data-mistake="${ids.shared}:1"] [data-action="correction-history"]`);
+    await waitFor(() => card().querySelector('.attempts-table'), '查看订正历史');
+    assert.equal(card().querySelectorAll('tbody tr').length, 3); assert.equal(card().querySelectorAll('.attempt-right').length, 1);
+    assert.ok(pupil.d.querySelector(`[data-mistake="${ids.second}:1"]`).textContent.includes('已订正 0 次'));
+    const refreshed = await page(pupil.session, '#/mistakes'); assert.ok(refreshed.d.querySelector(`[data-mistake="${ids.shared}:1"]`).textContent.includes('已订正 3 次')); refreshed.w.close();
+    assert.deepEqual(app.db.prepare('SELECT * FROM submissions ORDER BY assignment_id,student_id').all(), before);
+  }, undefined, { clock: () => Date.parse('2026-11-24T08:00:00Z') });
+});
+
+test('订正断网保留输入、响应丢失重试不重复计次，刷新隐答案且账号之间不串题', async () => {
+  await withPages(async ({ app, page, login }) => {
+    const ids = seedCorrections(app.db), pupil = await page(); await login(pupil, 'learner', 'Teacher123!');
+    const path = `#/mistakes/${ids.shared}/1`;
+    pupil.w.location.hash = path; await waitFor(() => pupil.d.querySelector('#correction-form'), '打开订正');
+    pupil.fill('correctionAnswer', 12); pupil.session.failPath = '/attempts'; pupil.submit('correction-form');
+    await waitFor(() => pupil.d.querySelector('#correction-error')?.textContent.includes('连接失败'), '离线提示');
+    assert.equal(pupil.d.querySelector('[name="correctionAnswer"]').value, '12');
+    assert.equal(app.db.prepare('SELECT COUNT(*) AS n FROM correction_attempts').get().n, 0);
+    pupil.session.failPath = '';
+    const original = pupil.w.fetch; let lost = true;
+    pupil.w.fetch = async (path, options) => { const response = await original(path, options); if (lost && String(path).endsWith('/attempts') && options.method === 'POST') { lost = false; throw new Error('模拟回包丢失'); } return response; };
+    pupil.submit('correction-form'); await waitFor(() => !lost && pupil.d.querySelector('#correction-error')?.textContent.includes('连接失败'), '保存成功但回包丢失');
+    assert.equal(app.db.prepare('SELECT COUNT(*) AS n FROM correction_attempts').get().n, 1);
+    pupil.submit('correction-form'); await waitFor(() => pupil.d.querySelector('.correction-result'), '同一次提交重试');
+    assert.equal(app.db.prepare('SELECT COUNT(*) AS n FROM correction_attempts').get().n, 1);
+    const fresh = await page(pupil.session, path);
+    assert.equal(fresh.d.querySelector('.correction-result,.correction-explanation,.attempts-table'), null);
+    assert.equal(fresh.d.querySelector('[name="correctionAnswer"]').value, '');
+    assert.ok(fresh.d.querySelector('.page-title p').textContent.includes('已订正 1 次'));
+    fresh.fill('correctionAnswer', 13); fresh.w.confirm = () => false; fresh.click('nav a[href="#/mistakes"]');
+    await waitFor(() => fresh.w.location.hash === path, '取消离开订正'); assert.equal(fresh.d.querySelector('[name="correctionAnswer"]').value, '13');
+    fresh.w.confirm = () => true; fresh.click('[data-action="logout"]'); await waitFor(() => fresh.d.querySelector('#login-form'), '退出订正');
+    await login(fresh, 'other', 'Teacher123!'); fresh.click('nav a[href="#/mistakes"]');
+    await waitFor(() => fresh.d.querySelectorAll('.mistake-card').length === 1, '另一学生只有自己的错题');
+    assert.equal(fresh.d.querySelector('.mistake-card').dataset.mistake, `${ids.shared}:2`);
+    fresh.w.location.hash = path; await waitFor(() => fresh.d.querySelector('.empty p')?.textContent.includes('错题不存在'), '拦截其他学生的错题');
+    assert.equal(fresh.d.querySelector('#correction-form,.correction-result'), null);
+    for (const username of ['perfect', 'draft']) { const empty = await page(); await login(empty, username, 'Teacher123!'); empty.click('nav a[href="#/mistakes"]'); await waitFor(() => empty.d.querySelector('.empty h2')?.textContent === '暂时没有错题', '没有已交错题'); empty.w.close(); }
+    const teacher = await page(); await login(teacher, 'teacher', 'Teacher123!'); assert.equal(teacher.d.querySelector('nav a[href="#/mistakes"]'), null);
+  }, undefined, { clock: () => Date.parse('2026-11-24T08:00:00Z') });
+});
+
+test('旧班级学生从错题本订正历史混合题，原分数和答案仍可回看', async () => {
+  await withPages(async ({ app, page, login }) => {
+    const before = app.db.prepare('SELECT * FROM submissions ORDER BY assignment_id,student_id').all();
+    const pupil = await page(); await login(pupil, 'pupil3', studentPassword); pupil.click('nav a[href="#/mistakes"]');
+    await waitFor(() => pupil.d.querySelector('[data-mistake="33:1"]'), '历史错题自动收录');
+    pupil.click('[data-mistake="33:1"] a.button'); await waitFor(() => pupil.d.querySelector('#correction-form'), '历史混合题订正');
+    pupil.fill('correctionAnswer', 27); pupil.submit('correction-form'); await waitFor(() => pupil.d.querySelector('.correction-result.right'), '旧题订正正确');
+    assert.equal(pupil.d.querySelectorAll('.correction-explanation li').length, 2);
+    pupil.click('.correction-original a'); await waitFor(() => pupil.d.querySelector('.source-question'), '回历史原卷');
+    assert.equal(pupil.d.querySelector('.score-stamp strong').textContent, '70'); assert.equal(pupil.d.querySelector('#answer-0').value, '0');
+    assert.deepEqual(app.db.prepare('SELECT * FROM submissions ORDER BY assignment_id,student_id').all(), before);
+  }, createHistoryClass);
 });
 
 function seedRecords(app) {

@@ -91,6 +91,23 @@ export function formatExpression(q, parentPrecedence = 0, right = false) {
     ? `(${expression})` : expression;
 }
 
+function upgradeCorrectionAttempts(db) {
+  const columns = new Set(db.prepare('PRAGMA table_info(correction_attempts)').all().map(row => row.name));
+  if (columns.has('request_id')) {
+    db.exec(`ALTER TABLE correction_attempts RENAME COLUMN request_id TO request_key;
+      ALTER TABLE correction_attempts RENAME COLUMN submitted_at TO created_at;`);
+  }
+  if (!columns.has('attempt_number')) {
+    db.exec(`ALTER TABLE correction_attempts ADD COLUMN attempt_number INTEGER NOT NULL DEFAULT 1 CHECK(attempt_number >= 1);
+      WITH numbered AS (
+        SELECT id, ROW_NUMBER() OVER (PARTITION BY student_id, assignment_id, question_number ORDER BY id) AS n
+        FROM correction_attempts
+      )
+      UPDATE correction_attempts SET attempt_number = numbered.n FROM numbered WHERE correction_attempts.id = numbered.id;
+      CREATE UNIQUE INDEX correction_attempts_by_question ON correction_attempts(student_id, assignment_id, question_number, attempt_number);`);
+  }
+}
+
 export async function openStore(path, teacherPassword = 'Teacher123!') {
   if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
   const db = new DatabaseSync(path);
@@ -134,8 +151,15 @@ export async function openStore(path, teacherPassword = 'Teacher123!') {
     assignment_id INTEGER NOT NULL REFERENCES assignments(id), student_id INTEGER NOT NULL REFERENCES users(id),
     started_at TEXT NOT NULL, PRIMARY KEY(assignment_id,student_id)
   )`);
+  db.exec(`CREATE TABLE IF NOT EXISTS correction_attempts (
+    id INTEGER PRIMARY KEY, student_id INTEGER NOT NULL REFERENCES users(id), assignment_id INTEGER NOT NULL REFERENCES assignments(id),
+    question_number INTEGER NOT NULL CHECK(question_number>=1), attempt_number INTEGER NOT NULL CHECK(attempt_number>=1),
+    request_key TEXT NOT NULL, answer INTEGER NOT NULL CHECK(answer>=0), correct INTEGER NOT NULL CHECK(correct IN (0,1)), created_at TEXT NOT NULL,
+    UNIQUE(student_id,assignment_id,question_number,attempt_number), UNIQUE(student_id,request_key)
+  )`);
   db.exec('BEGIN IMMEDIATE');
   try {
+    upgradeCorrectionAttempts(db);
     const migratingClass = !db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='assignment_classes'").get();
     db.exec(`CREATE TABLE IF NOT EXISTS classes(id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE);
       INSERT OR IGNORE INTO classes(id,name) VALUES(1,'原班级');`);

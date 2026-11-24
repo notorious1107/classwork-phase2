@@ -1,7 +1,7 @@
 const root = document.querySelector('#app');
 const notice = document.querySelector('#notice');
 const dialog = document.querySelector('#submit-dialog');
-const state = { user: null, assignments: [], students: [], classes: [], classId: null, importResult: null, studentQuery: '', calendarData: null, calendarDay: '', calendarBack: null, historyData: null, reviewData: null, practiceOptions: null, assignment: null, dirty: false, busy: false, route: '', loading: false, loadError: '' };
+const state = { user: null, assignments: [], students: [], classes: [], classId: null, importResult: null, studentQuery: '', calendarData: null, calendarDay: '', calendarBack: null, historyData: null, reviewData: null, mistakes: null, correction: null, mistakeHistories: {}, practiceOptions: null, assignment: null, dirty: false, busy: false, route: '', loading: false, loadError: '' };
 let loadEpoch = 0;
 let toastTimer;
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -41,7 +41,7 @@ async function api(path, method = 'GET', data) {
   for (const a of Array.isArray(result) ? result : [result]) if (a.serverNow) a.receivedAt = performance.now();
   if (!response.ok) {
     if (response.status === 401 && state.user) {
-      loadEpoch++; state.user = null; state.dirty = false; state.assignment = null; state.assignments = []; state.students = []; state.importResult = null; state.studentQuery = ''; state.calendarData = null; state.calendarBack = null; state.historyData = null; state.reviewData = null; render();
+      loadEpoch++; state.user = null; state.dirty = false; state.assignment = null; state.assignments = []; state.students = []; state.importResult = null; state.studentQuery = ''; state.calendarData = null; state.calendarBack = null; state.historyData = null; state.reviewData = null; state.mistakes = null; state.correction = null; state.mistakeHistories = {}; render();
     }
     throw Object.assign(new Error(result.error || '操作失败，请重试'), { status: response.status });
   }
@@ -53,8 +53,9 @@ function badge(a) {
 function header() {
   const inCalendar = routePath() === '#/calendar' || !!state.calendarBack;
   const inStudents = routePath().startsWith('#/students') || (state.reviewData && new URLSearchParams(location.hash.split('?')[1]).has('historyClassId'));
+  const inMistakes = routePath().startsWith('#/mistakes');
   return `<header class="header"><a href="#/" class="brand"><span class="brand-mark">＋</span><span>小小算术<small>班级作业本</small></span></a>
-    ${state.user ? `<nav aria-label="主导航"><a href="#/" ${!inStudents && !inCalendar ? 'aria-current="page"' : ''}>${state.user.role === 'teacher' ? '作业与成绩' : '我的作业'}</a>${state.user.role === 'teacher' ? `<a href="#/calendar" ${inCalendar ? 'aria-current="page"' : ''}>练习月历</a><a href="#/students" ${inStudents ? 'aria-current="page"' : ''}>学生名单</a>` : ''}</nav>
+    ${state.user ? `<nav aria-label="主导航"><a href="#/" ${!inStudents && !inCalendar && !inMistakes ? 'aria-current="page"' : ''}>${state.user.role === 'teacher' ? '作业与成绩' : '我的作业'}</a>${state.user.role === 'teacher' ? `<a href="#/calendar" ${inCalendar ? 'aria-current="page"' : ''}>练习月历</a><a href="#/students" ${inStudents ? 'aria-current="page"' : ''}>学生名单</a>` : `<a href="#/mistakes" ${inMistakes ? 'aria-current="page"' : ''}>我的错题本</a>`}</nav>
     <div class="user"><span>${esc(state.user.name)}<small>${state.user.role === 'teacher' ? '教师' : '学生'} · ${esc(state.user.username)}</small></span><button class="text-button" data-action="logout">退出</button></div>` : '<span class="header-note">每天练一练，一点点进步。</span>'}</header>`;
 }
 function loginView() {
@@ -188,6 +189,34 @@ function reportView(a) {
     <div class="report-stats"><div><span>已交人数</span><strong>${a.submitted}<small> / ${a.total} 人</small></strong></div><div><span>未交人数</span><strong>${a.pending}<small> 人</small></strong></div><div><span>班级平均分</span><strong>${a.average ?? '—'}<small>${a.average === null ? ' 暂无提交' : ' 分'}</small></strong></div></div>
     <section class="panel"><div class="section-heading"><h2>每位同学的进度</h2><span class="muted small">平均分仅计算已提交学生</span></div><div class="table-wrap"><table><thead><tr><th scope="col">学生</th><th scope="col">账号</th><th scope="col">作业状态</th><th scope="col">提交时间</th><th scope="col">成绩 / 100</th></tr></thead><tbody>${a.students.map(s => `<tr><td><a class="student-review-link" href="${esc(reviewHref(a.id, s.id, routeParams().has('calendar') ? { calendar: routeParams().get('calendar') } : {}))}"><span class="avatar">${esc(s.name.slice(0, 1))}</span>${esc(s.name)}<small>查看作答 →</small></a></td><td class="mono">${esc(s.username)}</td><td>${badge({ ...s, dueAt: a.dueAt, isClosed: a.isClosed })}</td><td>${date(s.submittedAt)}</td><td class="score-cell">${s.score ?? '—'}</td></tr>`).join('') || '<tr><td colspan="5">还没有学生，请前往学生名单创建账号。</td></tr>'}</tbody></table></div></section><details class="panel questions-details"><summary>查看本次题目（${a.questionCount} 题）</summary><div class="question-preview">${a.expressions.map((expression, i) => `<span>${i + 1}.　${esc(expression)} = ?</span>`).join('')}</div></details>`;
 }
+const mistakeHref = (a, original = false) => `#/mistakes/${a.assignmentId}/${a.questionNumber}${original ? '/original' : ''}`;
+function attemptsTable(attempts) {
+  return attempts.length ? `<div class="table-wrap"><table class="attempts-table"><thead><tr><th scope="col">次数</th><th scope="col">我的答案</th><th scope="col">结果</th><th scope="col">订正时间（北京时间）</th></tr></thead><tbody>${attempts.map(a => `<tr><td>第 ${a.attemptNumber} 次</td><td class="mono">${a.answer}</td><td class="${a.correct ? 'attempt-right' : 'attempt-wrong'}">${a.correct ? '✓ 做对了' : '✕ 还没做对'}</td><td>${date(a.submittedAt)}</td></tr>`).join('')}</tbody></table></div>` : '<p class="muted">还没有订正记录。</p>';
+}
+function mistakesView() {
+  const items = state.mistakes;
+  return `${pageTitle('每天进步一点点', '我的错题本', '收录第一次交卷时做错的题；订正后仍保留原作答和原分数。', '<button class="button secondary" data-action="refresh">刷新错题 ↻</button>')}<div class="mistake-overview"><span class="badge">共 ${items.length} 道错题</span><span class="badge done">最近订正正确 ${items.filter(i => i.lastAttemptCorrect).length} 道</span><span class="small muted">按原交卷时间，最近在前</span></div><section class="mistake-grid">${items.map(a => {
+    const key = `${a.assignmentId}:${a.questionNumber}`, history = state.mistakeHistories[key];
+    return `<article class="panel mistake-card" data-mistake="${key}"><div class="section-heading"><span class="eyebrow">第 ${a.questionNumber} 题</span><span class="badge ${a.lastAttemptCorrect ? 'done' : 'draft'}">${a.lastAttemptCorrect ? '最近订正正确' : a.attemptCount ? '继续订正' : '还未订正'}</span></div><p class="mistake-expression">${esc(a.expression)} ＝ ?</p><a class="mistake-origin" href="${mistakeHref(a, true)}">${esc(a.title)} · 第 ${a.questionNumber} 题 ↗</a><p class="small muted">${date(a.submittedAt)} 首次交卷 · 当时的答案：${a.originalAnswer == null ? '未填' : esc(a.originalAnswer)}</p><p class="mistake-progress">已订正 ${a.attemptCount} 次${a.firstCorrectAttempt ? ` · 第 ${a.firstCorrectAttempt} 次首次做对` : ''}</p><div class="actions"><a class="button" href="${mistakeHref(a)}">订正 →</a>${a.attemptCount ? `<button class="text-button" data-action="correction-history" data-assignment="${a.assignmentId}" data-number="${a.questionNumber}">${history ? '收起订正记录' : '查看订正记录'}</button>` : ''}</div>${history ? `<section class="mistake-history" aria-label="第 ${a.questionNumber} 题订正记录">${attemptsTable(history)}</section>` : ''}</article>`;
+  }).join('') || '<div class="empty panel"><h2>暂时没有错题</h2><p>交卷后，第一次答错的题会收在这里。草稿和未交作业不收录。</p><a class="button secondary" href="#/">返回我的作业</a></div>'}</section>`;
+}
+function correctionView() {
+  const c = state.correction, a = c.question, result = c.feedback;
+  return `<a class="back-link" href="#/mistakes">← 返回我的错题本</a>${pageTitle('合上答案，再算一次', '独立订正', `${esc(a.title)} · 第 ${a.questionNumber} 题 · 已订正 ${result?.attemptCount ?? a.attemptCount} 次`)}<section class="panel correction-paper"><span class="eyebrow">第 ${a.questionNumber} 题</span><p class="correction-expression">${esc(a.expression)} ＝ ?</p>${result ? `<div class="correction-result ${result.attempt.correct ? 'right' : 'wrong'}" role="status"><strong>第 ${result.attempt.attemptNumber} 次订正：${result.attempt.correct ? '✓ 答对了' : '再想一想'}</strong><p>我的答案：<b>${result.attempt.answer}</b>　正确答案：<b>${result.correctAnswer}</b></p></div><section class="correction-explanation"><h2>一步一步算</h2><ol>${result.steps.map(s => `<li><strong>${esc(s.reason)}</strong><p class="step-expression">${esc(s.before)}<br>＝ ${esc(s.after)}</p><small>${esc(s.calculation)}</small></li>`).join('')}</ol></section><div class="actions correction-actions"><button class="button" data-action="retry-correction">${result.attempt.correct ? '合上讲解，再练一次' : '再订正一次'}</button><a class="button secondary" href="#/mistakes">返回错题本</a></div><section class="correction-attempts"><h2>我的订正记录</h2>${attemptsTable(result.attempts)}</section>` : `<p class="muted small">先独立计算，提交后再看对错和讲解。</p><form id="correction-form"><fieldset><legend class="sr-only">独立填写订正答案</legend><label>订正答案<input name="correctionAnswer" type="number" min="0" max="${a.answerMax}" step="1" inputmode="numeric" autocomplete="off" required value="${esc(c.answer)}" placeholder="填入你的答案"></label><button class="button" type="submit">提交订正</button></fieldset><p id="correction-error" class="form-error" role="alert"></p></form>`}<div class="correction-original"><a class="text-button" href="${mistakeHref(a, true)}">查看当时交的原卷 →</a><p class="muted small">每次订正单独记录，原作业的答案和分数照旧。</p></div></section>`;
+}
+async function saveCorrection() {
+  if (state.busy || !state.correction || state.correction.feedback) return;
+  const form = document.querySelector('#correction-form');
+  if (!form.reportValidity()) return;
+  const c = state.correction, answer = Number(form.elements.correctionAnswer.value);
+  if (!c.request || c.request.answer !== answer) c.request = { answer, requestId: Array.from(crypto.getRandomValues(new Uint8Array(16)), v => v.toString(16).padStart(2, '0')).join('') };
+  state.busy = true; form.querySelector('fieldset').disabled = true; errorAt('correction-error', '');
+  try {
+    const result = await api(`/mistakes/${c.question.assignmentId}/${c.question.questionNumber}/attempts`, 'POST', c.request);
+    c.feedback = result; state.dirty = false; render();
+  } catch (e) { errorAt('correction-error', e.message); }
+  finally { state.busy = false; form.querySelector('fieldset').disabled = false; }
+}
 function studentHome() {
   const pending = state.assignments.filter(a => !a.submittedAt && !closed(a)).length;
   const overdue = state.assignments.filter(a => !a.submittedAt && closed(a)).length;
@@ -197,11 +226,13 @@ function studentHome() {
 }
 function workbook(a) {
   const done = !!a.submittedAt;
+  const original = routePath().match(/^#\/mistakes\/([1-9]\d*)\/([1-9]\d*)\/original$/);
+  const sourceNote = original ? `<div class="mistake-source-note">来自错题本 · 第 ${original[2]} 题已标出。<a href="#/mistakes/${original[1]}/${original[2]}">合上原卷，独立订正 →</a></div>` : '';
   if (a.timeLimitMinutes && !a.startedAt && !done) return `<a class="back-link" href="#/">← 返回我的作业</a>${pageTitle('限时练习', esc(a.title), `${assignmentSummary(a)} · ${deadline(a)}`)}<section class="panel"><h2>准备好后开始作答</h2><p>点击后开始计时，刷新或重新登录不会暂停。个人限时和全班截止以先到者为准；到点仍可保存草稿，未提交计为未交。</p><button class="button" data-action="start" ${closed(a) ? 'disabled' : ''}>${closed(a) ? '已截止，不能开始' : '开始作答'}</button><p id="start-error" class="form-error" role="alert"></p></section>`;
   const count = a.answers.filter(v => v !== null).length;
-  return `<a class="back-link" href="#/">← 返回我的作业</a><div class="workbook-heading">${pageTitle(done ? '练习完成' : '专心算一算', esc(a.title), `${assignmentSummary(a)} · 每题 ${100 / a.questionCount} 分 · 答案是 0–${a.answerMax} 的整数 · ${deadline(a)}`)}${done ? `<div class="score-stamp"><strong>${a.score}</strong><span>/ 100 分</span></div>` : ''}</div>
+  return `<a class="back-link" href="${original ? '#/mistakes' : '#/'}">← 返回${original ? '我的错题本' : '我的作业'}</a>${sourceNote}<div class="workbook-heading">${pageTitle(done ? '练习完成' : '专心算一算', esc(a.title), `${assignmentSummary(a)} · 每题 ${100 / a.questionCount} 分 · 答案是 0–${a.answerMax} 的整数 · ${deadline(a)}`)}${done ? `<div class="score-stamp"><strong>${a.score}</strong><span>/ 100 分</span></div>` : ''}</div>
     ${done ? `<div class="result-banner"><strong>${a.score === 100 ? '全部答对，真棒！' : `答对了 ${a.results.filter(r => r.correct).length} / ${a.questionCount} 道题，再看看需要订正的地方。`}</strong><span>${date(a.submittedAt)} 提交 · 已自动批改</span></div>` : `<div class="progress-heading"><span id="progress-label">已作答 ${count} / ${a.questionCount} 题</span><span id="save-state" class="muted">${a.savedAt ? `草稿保存于 ${date(a.savedAt)}` : '写好几题后，可以先保存草稿。'}</span></div><progress id="progress" max="${a.questionCount}" value="${count}" aria-label="作答进度"></progress>`}
-    ${a.timeLimitMinutes && !done ? `<div class="timer-panel"><strong id="countdown" role="timer"></strong><span>开始于 ${date(a.startedAt)} · 最晚 ${date(a.effectiveDueAt)}（北京时间）</span></div>` : ''}<p id="deadline-state" class="deadline-message" role="status" hidden></p><form id="answer-form"><fieldset ${done ? 'disabled' : ''}><legend class="sr-only">${a.questionCount} 道计算题</legend><div class="question-grid">${a.expressions.map((expression, i) => `<div class="question ${done ? (a.results[i].correct ? 'correct' : 'incorrect') : ''}"><span class="question-number">第 ${i + 1} 题</span><div class="equation"><label for="answer-${i}"><span class="sr-only">第 ${i + 1} 题：</span>${esc(expression)} <span class="operator">＝</span></label><input id="answer-${i}" name="answer-${i}" type="number" min="0" max="${a.answerMax}" step="1" inputmode="numeric" autocomplete="off" aria-label="第 ${i + 1} 题答案" value="${esc(a.answers[i])}" ${done ? 'readonly' : ''}></div>${done ? `<div class="question-feedback">${a.results[i].correct ? '✓ 答对了' : `✕ 正确答案：${a.results[i].correctAnswer}`}</div>` : ''}</div>`).join('')}</div></fieldset>
+    ${a.timeLimitMinutes && !done ? `<div class="timer-panel"><strong id="countdown" role="timer"></strong><span>开始于 ${date(a.startedAt)} · 最晚 ${date(a.effectiveDueAt)}（北京时间）</span></div>` : ''}<p id="deadline-state" class="deadline-message" role="status" hidden></p><form id="answer-form"><fieldset ${done ? 'disabled' : ''}><legend class="sr-only">${a.questionCount} 道计算题</legend><div class="question-grid">${a.expressions.map((expression, i) => `<div data-original-question="${i + 1}" class="question ${original && Number(original[2]) === i + 1 ? 'source-question' : ''} ${done ? (a.results[i].correct ? 'correct' : 'incorrect') : ''}"><span class="question-number">第 ${i + 1} 题</span><div class="equation"><label for="answer-${i}"><span class="sr-only">第 ${i + 1} 题：</span>${esc(expression)} <span class="operator">＝</span></label><input id="answer-${i}" name="answer-${i}" type="number" min="0" max="${a.answerMax}" step="1" inputmode="numeric" autocomplete="off" aria-label="第 ${i + 1} 题答案" value="${esc(a.answers[i])}" ${done ? 'readonly' : ''}></div>${done ? `<div class="question-feedback">${a.results[i].correct ? '✓ 答对了' : `✕ 正确答案：${a.results[i].correctAnswer}`}</div>` : ''}</div>`).join('')}</div></fieldset>
     ${done ? '<div class="actions result-actions"><a class="button secondary" href="#/">返回我的作业</a><span class="muted">作业已提交，答案不能再修改。</span></div>' : `<div class="answer-actions"><div><strong>慢慢算，认真检查。</strong><p class="small muted">保存草稿后，下次登录可以接着写。</p></div><div class="actions"><button type="button" class="button secondary" data-action="save">保存草稿</button><button type="submit" class="button" data-submit>提交作业 →</button></div></div><p id="answer-error" class="form-error" role="alert"></p>`}</form>`;
 }
 function render() {
@@ -209,6 +240,8 @@ function render() {
   if (!state.user) view = loginView();
   else if (state.loading) view = '<p class="loading">正在打开作业本…</p>';
   else if (state.loadError) view = `<section class="empty panel"><h2>作业本暂时没有打开</h2><p>${esc(state.loadError)}</p><button class="button" data-action="refresh">重新加载</button><p><a href="#/">返回作业列表</a></p></section>`;
+  else if (state.correction) view = correctionView();
+  else if (state.mistakes) view = mistakesView();
   else if (state.reviewData) view = reviewView(state.reviewData);
   else if (state.historyData) view = historyView(state.historyData);
   else if (routePath() === '#/students' && state.user.role === 'teacher') view = studentsView();
@@ -222,7 +255,7 @@ function render() {
 async function load() {
   if (!state.user) { render(); return; }
   const epoch = ++loadEpoch;
-  state.loading = true; state.loadError = ''; state.assignment = null; state.calendarData = null; state.calendarBack = null; state.historyData = null; state.reviewData = null; render();
+  state.loading = true; state.loadError = ''; state.assignment = null; state.calendarData = null; state.calendarBack = null; state.historyData = null; state.reviewData = null; state.mistakes = null; state.correction = null; state.mistakeHistories = {}; render();
   try {
     const path = routePath(), params = new URLSearchParams(location.hash.split('?')[1] ?? '');
     if (state.user.role === 'teacher') {
@@ -239,7 +272,16 @@ async function load() {
     const match = path.match(/^#\/assignment\/([1-9]\d*)$/);
     const reviewMatch = path.match(/^#\/assignment\/([1-9]\d*)\/student\/([1-9]\d*)$/);
     const historyMatch = path.match(/^#\/students(?:\/([1-9]\d*))?\/history$/);
-    if (historyMatch && state.user.role === 'teacher') {
+    const mistakeMatch = path.match(/^#\/mistakes\/([1-9]\d*)\/([1-9]\d*)(\/original)?$/);
+    if (path === '#/mistakes' && state.user.role === 'student') {
+      const mistakes = await api('/mistakes');
+      if (epoch !== loadEpoch) return; state.mistakes = mistakes;
+    } else if (mistakeMatch && state.user.role === 'student') {
+      const data = await api(`/mistakes/${mistakeMatch[1]}/${mistakeMatch[2]}${mistakeMatch[3] ?? ''}`);
+      if (epoch !== loadEpoch) return;
+      if (mistakeMatch[3]) state.assignment = data;
+      else state.correction = { question: data, answer: '', feedback: null, request: null };
+    } else if (historyMatch && state.user.role === 'teacher') {
       const students = await api(`/students?classId=${state.classId}`);
       if (epoch !== loadEpoch) return;
       state.students = students;
@@ -301,6 +343,7 @@ async function formAction(form, errorId, action) {
 root.addEventListener('submit', async event => {
   event.preventDefault();
   const form = event.target;
+  if (form.id === 'correction-form') await saveCorrection();
   if (form.id === 'history-filter-form' && !state.busy) {
     const filters = Object.fromEntries(new FormData(form));
     if (filters.from && filters.to && filters.from > filters.to) { errorAt('history-error', '开始日期不能晚于结束日期'); return; }
@@ -308,7 +351,7 @@ root.addEventListener('submit', async event => {
     if (location.hash === href) await load(); else location.hash = href;
   }
   if (form.id === 'login-form') await formAction(form, 'login-error', async data => {
-    state.user = await api('/login', 'POST', data); state.dirty = false; state.assignments = []; state.students = []; state.importResult = null; state.studentQuery = ''; state.calendarData = null; state.calendarBack = null; state.historyData = null; state.reviewData = null; state.assignment = null;
+    state.user = await api('/login', 'POST', data); state.dirty = false; state.assignments = []; state.students = []; state.importResult = null; state.studentQuery = ''; state.calendarData = null; state.calendarBack = null; state.historyData = null; state.reviewData = null; state.mistakes = null; state.correction = null; state.mistakeHistories = {}; state.assignment = null;
     history.replaceState(null, '', '#/'); await load();
   });
   if (form.id === 'publish-form') await formAction(form, 'publish-error', async data => {
@@ -365,6 +408,7 @@ async function saveAnswers(submit = false) {
   finally { state.busy = false; fieldset.disabled = false; form.querySelectorAll('button').forEach(b => { b.disabled = false; }); syncDeadlineUI(); }
 }
 root.addEventListener('input', event => {
+  if (event.target.name === 'correctionAnswer') { state.correction.answer = event.target.value; state.dirty = true; }
   if (event.target.name === 'studentSearch') { state.studentQuery = event.target.value; updateStudentSearch(); }
   if (event.target.name === 'category' || event.target.name === 'grade') syncPracticeFields();
   if (event.target.closest('#answer-form')) {
@@ -403,6 +447,21 @@ root.addEventListener('click', async event => {
   const action = event.target.closest('[data-action]')?.dataset.action;
   if (state.busy && (event.target.closest('a') || action)) { event.preventDefault(); return; }
   if (action === 'save') await saveAnswers();
+  if (action === 'retry-correction' && state.correction) {
+    const c = state.correction;
+    state.correction = { question: { ...c.question, attemptCount: c.feedback.attemptCount }, answer: '', feedback: null, request: null };
+    state.dirty = false; render(); document.querySelector('[name="correctionAnswer"]')?.focus();
+  }
+  if (action === 'correction-history') {
+    const button = event.target.closest('button'), assignmentId = button.dataset.assignment, number = button.dataset.number, key = `${assignmentId}:${number}`, epoch = loadEpoch;
+    if (state.mistakeHistories[key]) { delete state.mistakeHistories[key]; render(); }
+    else {
+      button.disabled = true;
+      try { const history = await api(`/mistakes/${assignmentId}/${number}/attempts`); if (epoch === loadEpoch && state.mistakes) { state.mistakeHistories[key] = history; render(); } }
+      catch (e) { toast(e.message, true); }
+      finally { button.disabled = false; }
+    }
+  }
   if (action === 'calendar-grid') document.querySelector('.calendar-panel')?.scrollIntoView?.({ block: 'start' });
   if (event.target.closest('.calendar-day')?.getAttribute('href') === location.hash) {
     event.preventDefault(); document.querySelector('.calendar-daily')?.scrollIntoView?.({ block: 'start' });
@@ -420,7 +479,7 @@ root.addEventListener('click', async event => {
   if (action === 'logout') {
     if (state.dirty && !confirm('还有未保存的答案。确定退出并放弃这些修改吗？')) return;
     state.busy = true;
-    try { await api('/logout', 'POST', {}); loadEpoch++; state.user = null; state.assignment = null; state.assignments = []; state.students = []; state.importResult = null; state.studentQuery = ''; state.calendarData = null; state.calendarBack = null; state.historyData = null; state.reviewData = null; state.dirty = false; history.replaceState(null, '', '#/'); render(); }
+    try { await api('/logout', 'POST', {}); loadEpoch++; state.user = null; state.assignment = null; state.assignments = []; state.students = []; state.importResult = null; state.studentQuery = ''; state.calendarData = null; state.calendarBack = null; state.historyData = null; state.reviewData = null; state.mistakes = null; state.correction = null; state.mistakeHistories = {}; state.dirty = false; history.replaceState(null, '', '#/'); render(); }
     catch (e) { toast(e.message, true); }
     finally { state.busy = false; }
   }
@@ -434,7 +493,8 @@ window.addEventListener('hashchange', async () => {
     reverting = true; location.hash = state.route || '#/'; return;
   }
   state.dirty = false; await load();
-  if (routePath() === '#/calendar' && new URLSearchParams(location.hash.split('?')[1] ?? '').has('day')) document.querySelector('.calendar-daily')?.scrollIntoView?.({ block: 'start' });
+  if (document.querySelector('.source-question')) document.querySelector('.source-question').scrollIntoView?.({ block: 'center' });
+  else if (routePath() === '#/calendar' && new URLSearchParams(location.hash.split('?')[1] ?? '').has('day')) document.querySelector('.calendar-daily')?.scrollIntoView?.({ block: 'start' });
   else window.scrollTo(0, 0);
 });
 window.addEventListener('beforeunload', event => { if (state.dirty || state.busy) { event.preventDefault(); event.returnValue = ''; } });

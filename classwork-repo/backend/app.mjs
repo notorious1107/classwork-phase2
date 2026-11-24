@@ -5,6 +5,7 @@ import { mixedOptions, practiceOptions } from './questions.mjs';
 import { parseRoster, importRoster, rosterMaxBytes } from './roster.mjs';
 import { calendarMonth, beijingDateKey } from './calendar.mjs';
 import { historyFilters, matchesTopic, submissionStatus } from './records.mjs';
+import { mistakeBook, mistakeSource, correctionQuestion, correctionHistory, submitCorrection } from './corrections.mjs';
 
 class HttpError extends Error {
   constructor(status, message) { super(message); this.status = status; }
@@ -200,6 +201,23 @@ export async function createApp({ dbPath = 'data/classwork.sqlite', teacherPassw
         WHERE s.token_hash=? AND s.expires>?`).get(digest(rawToken), Date.now());
       if (!user) fail(401, '请先登录');
       if (path === '/api/me' && req.method === 'GET') return send(200, safeUser(user));
+      if (path === '/api/mistakes' && req.method === 'GET') {
+        requireRole(user, 'student'); return send(200, mistakeBook(db, user.id));
+      }
+      const mistakeMatch = path.match(/^\/api\/mistakes\/([1-9]\d*)\/([1-9]\d*)(?:\/(attempts|original))?$/);
+      if (mistakeMatch) {
+        requireRole(user, 'student');
+        const assignmentId = Number(mistakeMatch[1]), questionNumber = Number(mistakeMatch[2]), action = mistakeMatch[3];
+        mistakeSource(db, user.id, assignmentId, questionNumber);
+        if (!action && req.method === 'GET') return send(200, correctionQuestion(db, user.id, assignmentId, questionNumber));
+        if (action === 'original' && req.method === 'GET') return send(200, studentView(assignment(assignmentId), user.id));
+        if (action === 'attempts' && req.method === 'GET') return send(200, correctionHistory(db, user.id, assignmentId, questionNumber));
+        if (action === 'attempts' && req.method === 'POST') {
+          const input = await body(req);
+          const result = submitCorrection(db, user.id, assignmentId, questionNumber, input, clock());
+          return send(result.created ? 201 : 200, result.result);
+        }
+      }
       if (path === '/api/practice-options' && req.method === 'GET') { requireRole(user, 'teacher'); return send(200, practiceOptions); }
       const historyMatch = path.match(/^\/api\/students\/([1-9]\d*)\/history$/);
       if (historyMatch && req.method === 'GET') {
