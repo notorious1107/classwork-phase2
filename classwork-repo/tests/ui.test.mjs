@@ -264,6 +264,126 @@ test('北京时间发布、页面到点保留答案、逾期存草稿和已交�
   }, undefined, { clock: () => currentTime });
 });
 
+function seedRecords(app) {
+  const ids = seedCalendar(app), db = app.db;
+  const pupil = username => db.prepare('SELECT id FROM users WHERE username=?').get(username).id;
+  const original = historyAssignments[1], wrong = [...original.key]; wrong[0]++; wrong[1]++;
+  db.prepare('UPDATE assignments SET questions=?,category=? WHERE id=?').run(JSON.stringify(original.questions), original.category, ids.shared);
+  db.prepare('UPDATE submissions SET answers=?,score=80 WHERE assignment_id=? AND student_id=?').run(JSON.stringify(wrong), ids.shared, pupil('lin'));
+  db.prepare('UPDATE submissions SET answers=? WHERE assignment_id=? AND student_id=?').run(JSON.stringify(original.key), ids.shared, pupil('zhou'));
+  db.prepare('INSERT INTO submissions VALUES(?,?,?,?,?,?)').run(ids.shared, pupil('pending'), JSON.stringify([0, null, 16, ...Array(7).fill(null)]), '2026-11-24T04:00:00Z', null, null);
+  const mixed = publishAssignment(db, '上周先乘除后加减', { category: 'mixed-100', questionCount: 50, grade: 3, knowledgePoints: ['precedence'] });
+  db.prepare('UPDATE assignments SET created_at=? WHERE id=?').run('2026-11-17T01:00:00Z', mixed);
+  db.prepare('INSERT INTO submissions VALUES(?,?,?,?,?,?)').run(mixed, pupil('lin'), JSON.stringify([0, ...Array(49).fill(null)]), '2026-11-18T01:00:00Z', null, null);
+  db.prepare("INSERT INTO users(username,name,password_hash,role,class_id) SELECT 'blank','小林',password_hash,'student',1 FROM users WHERE role='teacher'").run();
+  db.prepare("INSERT INTO classes(name) VALUES('空班')").run();
+  return { ...ids, mixed, lin: pupil('lin'), pendingStudent: pupil('pending'), zhou: pupil('zhou'), blank: pupil('blank') };
+}
+
+test('教师从成绩姓名查看原卷和未评分草稿，刷新、成绩表与月历往返保持上下文', async () => {
+  await withPages(async ({ app, page, login }) => {
+    const ids = seedRecords(app), teacher = await page(); await login(teacher, 'teacher', 'Teacher123!');
+    const before = app.db.prepare('SELECT * FROM submissions ORDER BY assignment_id,student_id').all();
+    const report = `#/assignment/${ids.shared}?classId=1&calendar=2026-11-24`;
+    teacher.w.location.hash = report; await waitFor(() => teacher.d.querySelector('.report-stats'), '原班成绩表');
+    teacher.click(`.student-review-link[href*="student/${ids.lin}?"]`);
+    await waitFor(() => teacher.d.querySelectorAll('.review-question').length === 10, '已交原卷');
+    assert.equal(teacher.d.querySelector('.review-total strong').textContent, '80');
+    assert.equal(teacher.d.querySelectorAll('.review-question.incorrect').length, 2);
+    assert.equal(teacher.d.querySelectorAll('.review-question.correct').length, 8);
+    assert.equal(teacher.d.querySelector('[data-review-question="0"] .review-student-answer').textContent, '3');
+    assert.equal(teacher.d.querySelector('[data-review-question="0"] .review-correct-answer').textContent, '2');
+    assert.equal(teacher.d.querySelector('[data-review-question="4"] .review-student-answer').textContent, '0');
+    assert.equal(teacher.d.querySelector('.review-summary h2 b'), null);
+    assert.equal(teacher.d.querySelector('#answer-form'), null); assert.equal(teacher.d.querySelector('[data-action="save"]'), null);
+    assert.equal(teacher.d.querySelector('.back-link').getAttribute('href'), report);
+    const refreshed = await page(teacher.session, teacher.w.location.hash);
+    assert.equal(refreshed.d.querySelector('.review-total strong').textContent, '80'); refreshed.w.close();
+    teacher.click('.back-link'); await waitFor(() => teacher.d.querySelector('.report-stats'), '回成绩表');
+    teacher.click(`.student-review-link[href*="student/${ids.pendingStudent}?"]`);
+    await waitFor(() => teacher.d.querySelector('.review-status.ungraded'), '已保存草稿');
+    assert.ok(teacher.d.querySelector('.review-status').textContent.includes('未交、未评分'));
+    assert.ok(teacher.d.querySelector('.review-status').textContent.includes('2026/11/24 12:00'));
+    assert.equal(teacher.d.querySelector('.review-total'), null);
+    assert.equal(teacher.d.querySelectorAll('.review-question.incorrect,.review-question.correct').length, 0);
+    assert.equal(teacher.d.querySelector('[data-review-question="0"] .review-student-answer').textContent, '0');
+    assert.equal(teacher.d.querySelector('[data-review-question="1"] .review-student-answer').textContent, '未填');
+    assert.equal(teacher.d.querySelector('[data-review-question="1"] .review-correct-answer').textContent, '6');
+    teacher.click('.back-link'); await waitFor(() => teacher.d.querySelector('.report-stats'), '再回成绩表');
+    teacher.click(`.student-review-link[href*="student/${ids.blank}?"]`);
+    await waitFor(() => teacher.d.querySelector('.review-status')?.textContent.includes('暂无已保存答案'), '未保存原卷');
+    assert.equal([...teacher.d.querySelectorAll('.review-student-answer')].filter(el => el.textContent === '未填').length, 10);
+    teacher.click('.back-link'); await waitFor(() => teacher.d.querySelector('.report-stats'), '回成绩');
+    teacher.click('.back-link'); await waitFor(() => teacher.d.querySelector('.month-calendar'), '回月历');
+    assert.equal(teacher.d.querySelector('.calendar-day[aria-current="date"] time').getAttribute('datetime'), '2026-11-24');
+    assert.deepEqual(app.db.prepare('SELECT * FROM submissions ORDER BY assignment_id,student_id').all(), before);
+  }, undefined, { clock: () => Date.parse('2026-11-24T08:00:00Z') });
+});
+
+test('个人练习记录按日期知识点查询、原卷返回保留筛选，同名学生和切班不混入', async () => {
+  await withPages(async ({ app, page, login }) => {
+    const ids = seedRecords(app), teacher = await page(); await login(teacher, 'teacher', 'Teacher123!');
+    teacher.click('nav a[href="#/students"]'); await waitFor(() => teacher.d.querySelector('.student-record-link'), '名单记录入口');
+    teacher.click(`.student-record-link[href*="students/${ids.lin}/history"]`);
+    await waitFor(() => teacher.d.querySelector('#history-filter-form'), '小林练习记录');
+    assert.ok(teacher.d.querySelector('[name="historyStudent"]').textContent.includes('小林 · lin'));
+    assert.ok(teacher.d.querySelector('[name="historyStudent"]').textContent.includes('小林 · blank'));
+    teacher.fill('from', '2026-11-24'); teacher.fill('to', '2026-11-24'); teacher.fill('topic', 'mul-div-20'); teacher.submit('history-filter-form');
+    await waitFor(() => teacher.d.querySelectorAll('.history-item').length === 1 && teacher.d.querySelector('[name="topic"]')?.value === 'mul-div-20', '按发布日期查乘除');
+    assert.ok(teacher.d.querySelector('.history-item').textContent.includes('80'));
+    assert.ok(teacher.d.querySelector('.history-item').textContent.includes('2026/11/24 00:30'));
+    const filteredHash = teacher.w.location.hash;
+    teacher.click('.history-item'); await waitFor(() => teacher.d.querySelector('.review-total'), '记录打开原卷');
+    assert.equal(teacher.d.querySelector('.back-link').getAttribute('href'), filteredHash);
+    const refreshed = await page(teacher.session, teacher.w.location.hash);
+    refreshed.click('.back-link'); await waitFor(() => refreshed.d.querySelector('#history-filter-form'), '刷新原卷后返回筛选');
+    assert.equal(refreshed.d.querySelector('[name="from"]').value, '2026-11-24'); assert.equal(refreshed.d.querySelector('[name="topic"]').value, 'mul-div-20'); refreshed.w.close();
+    teacher.click('.back-link'); await waitFor(() => teacher.d.querySelector('#history-filter-form'), '回记录');
+    teacher.fill('from', '2026-11-16'); teacher.fill('to', '2026-11-22'); teacher.fill('topic', 'precedence'); teacher.submit('history-filter-form');
+    await waitFor(() => teacher.d.querySelector(`[data-history-assignment="${ids.mixed}"]`), '上周知识点筛选');
+    assert.ok(teacher.d.querySelector('.history-item').textContent.includes('未交、未评分'));
+    teacher.click('.history-item'); await waitFor(() => teacher.d.querySelectorAll('.review-question').length === 50, '50题草稿原卷');
+    teacher.click('.back-link'); await waitFor(() => teacher.d.querySelector('#history-filter-form'), '返回上周筛选');
+    teacher.fill('from', '2026-11-25'); teacher.submit('history-filter-form');
+    assert.ok(teacher.d.querySelector('#history-error').textContent.includes('开始日期不能晚于结束日期'));
+    teacher.click('.history-filters a.button'); await waitFor(() => teacher.d.querySelector('[name="from"]')?.value === '', '清空筛选');
+    const select = teacher.d.querySelector('[name="historyStudent"]'); select.value = String(ids.blank); select.dispatchEvent(new teacher.w.Event('change', { bubbles: true }));
+    await waitFor(() => teacher.d.querySelector('.page-title p')?.textContent.includes('blank'), '切换同名学生');
+    assert.equal(teacher.d.querySelector('.history-score strong'), null);
+    const changeClass = async id => { const field = teacher.d.querySelector('[name="currentClass"]'); field.value = String(id); field.dispatchEvent(new teacher.w.Event('change', { bubbles: true })); await waitFor(() => teacher.d.querySelector('[name="currentClass"]')?.value === String(id) && !teacher.d.querySelector('.loading'), '记录切班'); };
+    await changeClass(2); assert.ok(teacher.d.querySelector('.page-title p').textContent.includes('zhou'));
+    assert.equal(teacher.d.querySelectorAll('[name="historyStudent"] option').length, 1);
+    assert.ok(!teacher.d.querySelector(`[data-history-assignment="${ids.pending}"]`));
+    assert.equal(teacher.d.querySelector(`[data-history-assignment="${ids.shared}"] .history-score strong`).textContent, '100');
+    await changeClass(3); assert.ok(teacher.d.querySelector('.empty').textContent.includes('本班还没有学生'));
+    await changeClass(1); await waitFor(() => teacher.d.querySelector('#history-filter-form'), '返回一班');
+    teacher.fill('from', '2027-01-01'); teacher.submit('history-filter-form');
+    await waitFor(() => teacher.d.querySelector('.history-list .empty'), '空筛选');
+    teacher.click('.back-link'); await waitFor(() => teacher.d.querySelector('#student-form'), '回原班名单');
+    await changeClass(2); assert.equal(teacher.d.querySelector('tbody').textContent.includes('小周'), true);
+  }, undefined, { clock: () => Date.parse('2026-11-24T08:00:00Z') });
+});
+
+test('学生原卷与记录断网可重试，跨班或学生账号不能查看教师记录', async () => {
+  await withPages(async ({ app, page, login }) => {
+    const ids = seedRecords(app), teacher = await page(); await login(teacher, 'teacher', 'Teacher123!');
+    teacher.session.failPath = `/assignments/${ids.shared}/students/`;
+    teacher.w.location.hash = `#/assignment/${ids.shared}/student/${ids.lin}?classId=1`;
+    await waitFor(() => teacher.d.querySelector('.empty p')?.textContent.includes('连接失败'), '原卷断网');
+    teacher.session.failPath = ''; teacher.click('[data-action="refresh"]'); await waitFor(() => teacher.d.querySelector('.review-total'), '原卷重试');
+    teacher.w.location.hash = `#/assignment/${ids.shared}/student/${ids.zhou}?classId=1`;
+    await waitFor(() => teacher.d.querySelector('.empty p')?.textContent.includes('成绩名单'), '跨班原卷拦截');
+    assert.equal(teacher.d.querySelector('.review-question'), null);
+    teacher.session.failPath = '/history?'; teacher.w.location.hash = `#/students/${ids.lin}/history?classId=1`;
+    await waitFor(() => teacher.d.querySelector('.empty p')?.textContent.includes('连接失败'), '记录断网');
+    teacher.session.failPath = ''; teacher.click('[data-action="refresh"]'); await waitFor(() => teacher.d.querySelector('#history-filter-form'), '记录重试');
+    const pupil = await page(); await login(pupil, 'lin', 'Teacher123!');
+    pupil.w.location.hash = `#/assignment/${ids.shared}/student/${ids.pendingStudent}?classId=1`;
+    await waitFor(() => pupil.d.querySelector('.student-grid') && !pupil.d.querySelector('.loading'), '学生不能访问教师原卷');
+    assert.equal(pupil.d.querySelector('.review-question'), null); assert.equal(pupil.d.querySelector('#history-filter-form'), null);
+  }, undefined, { clock: () => Date.parse('2026-11-24T08:00:00Z') });
+});
+
 function seedCalendar(app) {
   const db = app.db;
   db.prepare("INSERT INTO classes(name) VALUES('二班')").run();

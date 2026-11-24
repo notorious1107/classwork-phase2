@@ -1,7 +1,7 @@
 const root = document.querySelector('#app');
 const notice = document.querySelector('#notice');
 const dialog = document.querySelector('#submit-dialog');
-const state = { user: null, assignments: [], students: [], classes: [], classId: null, importResult: null, studentQuery: '', calendarData: null, calendarDay: '', calendarBack: null, practiceOptions: null, assignment: null, dirty: false, busy: false, route: '', loading: false, loadError: '' };
+const state = { user: null, assignments: [], students: [], classes: [], classId: null, importResult: null, studentQuery: '', calendarData: null, calendarDay: '', calendarBack: null, historyData: null, reviewData: null, practiceOptions: null, assignment: null, dirty: false, busy: false, route: '', loading: false, loadError: '' };
 let loadEpoch = 0;
 let toastTimer;
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -41,7 +41,7 @@ async function api(path, method = 'GET', data) {
   for (const a of Array.isArray(result) ? result : [result]) if (a.serverNow) a.receivedAt = performance.now();
   if (!response.ok) {
     if (response.status === 401 && state.user) {
-      loadEpoch++; state.user = null; state.dirty = false; state.assignment = null; state.assignments = []; state.students = []; state.importResult = null; state.studentQuery = ''; state.calendarData = null; state.calendarBack = null; render();
+      loadEpoch++; state.user = null; state.dirty = false; state.assignment = null; state.assignments = []; state.students = []; state.importResult = null; state.studentQuery = ''; state.calendarData = null; state.calendarBack = null; state.historyData = null; state.reviewData = null; render();
     }
     throw Object.assign(new Error(result.error || '操作失败，请重试'), { status: response.status });
   }
@@ -52,8 +52,9 @@ function badge(a) {
 }
 function header() {
   const inCalendar = routePath() === '#/calendar' || !!state.calendarBack;
+  const inStudents = routePath().startsWith('#/students') || (state.reviewData && new URLSearchParams(location.hash.split('?')[1]).has('historyClassId'));
   return `<header class="header"><a href="#/" class="brand"><span class="brand-mark">＋</span><span>小小算术<small>班级作业本</small></span></a>
-    ${state.user ? `<nav aria-label="主导航"><a href="#/" ${!location.hash.includes('students') && !inCalendar ? 'aria-current="page"' : ''}>${state.user.role === 'teacher' ? '作业与成绩' : '我的作业'}</a>${state.user.role === 'teacher' ? `<a href="#/calendar" ${inCalendar ? 'aria-current="page"' : ''}>练习月历</a><a href="#/students" ${location.hash.includes('students') ? 'aria-current="page"' : ''}>学生名单</a>` : ''}</nav>
+    ${state.user ? `<nav aria-label="主导航"><a href="#/" ${!inStudents && !inCalendar ? 'aria-current="page"' : ''}>${state.user.role === 'teacher' ? '作业与成绩' : '我的作业'}</a>${state.user.role === 'teacher' ? `<a href="#/calendar" ${inCalendar ? 'aria-current="page"' : ''}>练习月历</a><a href="#/students" ${inStudents ? 'aria-current="page"' : ''}>学生名单</a>` : ''}</nav>
     <div class="user"><span>${esc(state.user.name)}<small>${state.user.role === 'teacher' ? '教师' : '学生'} · ${esc(state.user.username)}</small></span><button class="text-button" data-action="logout">退出</button></div>` : '<span class="header-note">每天练一练，一点点进步。</span>'}</header>`;
 }
 function loginView() {
@@ -71,6 +72,33 @@ const categoryNames = {
   'add-sub-20': '20 以内加减', 'mul-div-20': '20 以内乘除', 'mixed-100': '100 以内混合运算'
 };
 const routePath = () => location.hash.split('?')[0];
+const routeParams = () => new URLSearchParams(location.hash.split('?')[1] ?? '');
+const recordFilters = params => Object.fromEntries(['from', 'to', 'topic'].map(key => [key, params.get(key) || '']));
+function historyHref(studentId, filters = {}, classId = state.classId) {
+  const params = new URLSearchParams({ classId: String(classId) });
+  for (const key of ['from', 'to', 'topic']) if (filters[key]) params.set(key, filters[key]);
+  return `#/students${studentId ? `/${studentId}` : ''}/history?${params}`;
+}
+function reviewHref(assignmentId, studentId, context = {}) {
+  return `#/assignment/${assignmentId}/student/${studentId}?${new URLSearchParams({ classId: String(state.classId), ...context })}`;
+}
+function reportHref(assignmentId, classId = state.classId) {
+  const params = new URLSearchParams({ classId: String(classId) });
+  if (routeParams().has('calendar')) params.set('calendar', routeParams().get('calendar'));
+  return `#/assignment/${assignmentId}?${params}`;
+}
+const recordBadge = a => a.submittedAt ? '<span class="badge done">已交 · 已评分</span>' : `<span class="badge draft">未交、未评分${a.savedAt ? ' · 草稿' : ''}</span>`;
+function historyView(h) {
+  const heading = `${classPicker()}<a class="back-link" href="#/students?classId=${state.classId}">← 返回学生名单</a>${pageTitle('学生练习记录', h.student ? `${esc(h.student.name)}的练习` : '学生练习记录', h.student ? `学号 / 账号：${esc(h.student.username)} · 按北京时间的发布日期查询。` : '先在当前班级加入学生。', '<button class="button secondary" data-action="refresh">刷新记录 ↻</button>')}`;
+  if (!h.student) return `${heading}<section class="empty panel"><h2>本班还没有学生</h2><p>可返回学生名单导入或创建账号，也可切换班级。</p></section>`;
+  const f = h.filters;
+  return `${heading}<section class="panel history-filters"><label class="history-student">当前学生<select name="historyStudent">${state.students.map(s => `<option value="${s.id}" ${s.id === h.student.id ? 'selected' : ''}>${esc(s.name)} · ${esc(s.username)}</option>`).join('')}</select></label><form id="history-filter-form"><label>开始日期（北京时间）<input type="date" name="from" value="${esc(f.from)}"></label><label>结束日期（北京时间）<input type="date" name="to" value="${esc(f.to)}"></label><label>知识点 / 练习内容<select name="topic"><option value="">全部练习</option><optgroup label="练习题型">${Object.entries(categoryNames).map(([id, name]) => `<option value="${id}" ${f.topic === id ? 'selected' : ''}>${name}</option>`).join('')}</optgroup><optgroup label="混合知识点">${state.practiceOptions.topics.map(t => `<option value="${t.id}" ${f.topic === t.id ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}</optgroup></select></label><div class="actions"><button class="button" type="submit">查询记录</button><a class="button secondary" href="${historyHref(h.student.id)}">清空筛选</a></div><p id="history-error" class="form-error" role="alert"></p></form><p class="small muted">起止日期均包含，可留空。旧作业未记录细分知识点时，可按练习题型查询。</p></section><div class="section-heading"><h2>练习记录</h2><span class="badge">共 ${h.assignments.length} 份</span></div><section class="history-list">${h.assignments.map(a => `<a class="history-item" data-history-assignment="${a.id}" href="${esc(reviewHref(a.id, h.student.id, { classId: String(a.reviewClassId), historyClassId: String(h.classId), ...f }))}"><div><h3>${esc(a.title)}</h3><p>${date(a.createdAt)} 发布（北京时间）</p><span class="small muted">${categoryNames[a.category]} · ${a.questionCount} 题${a.knowledgePointNames.length ? ` · ${esc(a.knowledgePointNames.join('、'))}` : a.category === 'mixed-100' ? ' · 未记录细分知识点' : ''}${a.reviewClassId !== h.classId ? ` · ${esc(a.reviewClassName)}历史作业` : ''}</span></div><div class="history-status">${recordBadge(a)}<small>${a.submittedAt ? `${date(a.submittedAt)} 提交` : a.savedAt ? `${date(a.savedAt)} 保存草稿` : '暂无已保存答案'}</small></div><div class="history-score">${a.score === null ? '<span>未评分</span>' : `<strong>${a.score}</strong><small>/ 100 分</small>`}</div><span class="history-open">查看原卷 →</span></a>`).join('') || '<div class="empty panel"><h3>没有符合条件的练习</h3><p>可调整日期、知识点，或清空筛选查看全部记录。</p></div>'}</section>`;
+}
+function reviewView(a) {
+  const params = routeParams(), fromHistory = params.has('historyClassId'), done = !!a.submittedAt;
+  const back = fromHistory ? historyHref(a.student.id, recordFilters(params), Number(params.get('historyClassId'))) : reportHref(a.id, a.reviewClassId);
+  return `<a class="back-link" href="${esc(back)}">← 返回${fromHistory ? '学生练习记录' : '班级成绩表'}</a>${pageTitle('学生原卷', `${esc(a.student.name)}的作答`, `${esc(state.classes.find(c => c.id === a.reviewClassId)?.name)} · 学号 / 账号：${esc(a.student.username)}`, '<button class="button secondary" data-action="refresh">刷新原卷 ↻</button>')}<section class="panel review-summary"><h2>${esc(a.title)}</h2><p class="muted">${assignmentSummary(a)}<br>${date(a.createdAt)} 发布（北京时间） · ${deadline(a)}</p><div class="review-status ${done ? 'graded' : 'ungraded'}"><div><strong>${done ? '已交 · 已评分' : '未交、未评分'}</strong><p>${done ? `${date(a.submittedAt)} 提交 · 答对 ${a.results.filter(r => r.correct).length} / ${a.questionCount} 题` : a.savedAt ? `上次保存于 ${date(a.savedAt)}（北京时间）。以下为已保存的草稿，不含尚未保存的修改。` : '暂无已保存答案。该学生尚未提交，未评分。'}</p></div>${done ? `<div class="review-total"><strong>${a.score}</strong><span>/ 100 分</span></div>` : ''}</div><div class="actions review-links"><a class="text-button" href="${esc(reportHref(a.id, a.reviewClassId))}">班级成绩表 →</a><a class="text-button" href="${esc(historyHref(a.student.id, fromHistory ? recordFilters(params) : {}, a.student.classId))}">该生练习记录 →</a></div></section><section class="review-questions" aria-label="逐题作答详情">${a.expressions.map((expression, i) => `<article class="review-question ${done ? a.results[i].correct ? 'correct' : 'incorrect' : 'ungraded'}" data-review-question="${i}"><div class="section-heading"><span class="question-number">第 ${i + 1} 题</span><span class="review-verdict">${done ? a.results[i].correct ? '✓ 正确' : '✕ 错误' : '未评分'}</span></div><p class="review-expression">${esc(expression)} ＝ ?</p><dl class="review-answers"><div><dt>学生答案</dt><dd class="review-student-answer">${a.answers[i] == null ? '<span class="muted">未填</span>' : esc(a.answers[i])}</dd></div><div><dt>正确答案</dt><dd class="review-correct-answer">${a.results[i].correctAnswer}</dd></div></dl></article>`).join('')}</section>`;
+}
 function calendarHref(month, day, classId = state.classId) {
   const params = new URLSearchParams({ classId: String(classId) });
   if (month) params.set('month', month);
@@ -134,7 +162,7 @@ function matchingStudents() {
   return state.students.filter(s => s.name.toLowerCase().includes(query) || s.username.toLowerCase().includes(query));
 }
 function studentsTable(students) {
-  return students.length ? `<div class="table-wrap"><table><thead><tr><th scope="col">姓名</th><th scope="col">学号 / 登录账号</th><th scope="col">所在班级</th></tr></thead><tbody>${students.map(s => `<tr><td><span class="avatar">${esc(s.name.slice(0, 1))}</span>${esc(s.name)}</td><td class="mono">${esc(s.username)}</td><td><select data-student-class="${s.id}" aria-label="${esc(s.name)}（${esc(s.username)}）的班级">${classOptions(s.classId)}</select></td></tr>`).join('')}</tbody></table></div>` : state.students.length ? '<div class="empty"><h3>没有找到匹配的学生</h3><p>可更换姓名或学号，或清空搜索查看整班名单。</p></div>' : '<div class="empty"><h3>本班还没有学生</h3><p>导入名单、创建账号，或切换班级调整已有学生的归属。</p></div>';
+  return students.length ? `<div class="table-wrap"><table><thead><tr><th scope="col">姓名</th><th scope="col">学号 / 登录账号</th><th scope="col">所在班级</th></tr></thead><tbody>${students.map(s => `<tr><td><a class="student-record-link" href="${historyHref(s.id)}"><span class="avatar">${esc(s.name.slice(0, 1))}</span>${esc(s.name)}<small>练习记录 →</small></a></td><td class="mono">${esc(s.username)}</td><td><select data-student-class="${s.id}" aria-label="${esc(s.name)}（${esc(s.username)}）的班级">${classOptions(s.classId)}</select></td></tr>`).join('')}</tbody></table></div>` : state.students.length ? '<div class="empty"><h3>没有找到匹配的学生</h3><p>可更换姓名或学号，或清空搜索查看整班名单。</p></div>' : '<div class="empty"><h3>本班还没有学生</h3><p>导入名单、创建账号，或切换班级调整已有学生的归属。</p></div>';
 }
 function updateStudentSearch() {
   const list = document.querySelector('#student-list');
@@ -158,7 +186,7 @@ function fileBase64(file) {
 function reportView(a) {
   return `<a class="back-link" href="${state.calendarBack ?? '#/'}">← ${state.calendarBack ? '返回练习月历' : '返回班级作业'}</a>${classPicker(a.classes)}${pageTitle('作业成绩', esc(a.title), `${assignmentSummary(a)} · 满分 100 分 · ${date(a.createdAt)} 发布 · ${deadline(a)}`, '<button class="button secondary" data-action="refresh">刷新成绩 ↻</button>')}
     <div class="report-stats"><div><span>已交人数</span><strong>${a.submitted}<small> / ${a.total} 人</small></strong></div><div><span>未交人数</span><strong>${a.pending}<small> 人</small></strong></div><div><span>班级平均分</span><strong>${a.average ?? '—'}<small>${a.average === null ? ' 暂无提交' : ' 分'}</small></strong></div></div>
-    <section class="panel"><div class="section-heading"><h2>每位同学的进度</h2><span class="muted small">平均分仅计算已提交学生</span></div><div class="table-wrap"><table><thead><tr><th scope="col">学生</th><th scope="col">账号</th><th scope="col">作业状态</th><th scope="col">提交时间</th><th scope="col">成绩 / 100</th></tr></thead><tbody>${a.students.map(s => `<tr><td><span class="avatar">${esc(s.name.slice(0, 1))}</span>${esc(s.name)}</td><td class="mono">${esc(s.username)}</td><td>${badge({ ...s, dueAt: a.dueAt, isClosed: a.isClosed })}</td><td>${date(s.submittedAt)}</td><td class="score-cell">${s.score ?? '—'}</td></tr>`).join('') || '<tr><td colspan="5">还没有学生，请前往学生名单创建账号。</td></tr>'}</tbody></table></div></section><details class="panel questions-details"><summary>查看本次题目（${a.questionCount} 题）</summary><div class="question-preview">${a.expressions.map((expression, i) => `<span>${i + 1}.　${esc(expression)} = ?</span>`).join('')}</div></details>`;
+    <section class="panel"><div class="section-heading"><h2>每位同学的进度</h2><span class="muted small">平均分仅计算已提交学生</span></div><div class="table-wrap"><table><thead><tr><th scope="col">学生</th><th scope="col">账号</th><th scope="col">作业状态</th><th scope="col">提交时间</th><th scope="col">成绩 / 100</th></tr></thead><tbody>${a.students.map(s => `<tr><td><a class="student-review-link" href="${esc(reviewHref(a.id, s.id, routeParams().has('calendar') ? { calendar: routeParams().get('calendar') } : {}))}"><span class="avatar">${esc(s.name.slice(0, 1))}</span>${esc(s.name)}<small>查看作答 →</small></a></td><td class="mono">${esc(s.username)}</td><td>${badge({ ...s, dueAt: a.dueAt, isClosed: a.isClosed })}</td><td>${date(s.submittedAt)}</td><td class="score-cell">${s.score ?? '—'}</td></tr>`).join('') || '<tr><td colspan="5">还没有学生，请前往学生名单创建账号。</td></tr>'}</tbody></table></div></section><details class="panel questions-details"><summary>查看本次题目（${a.questionCount} 题）</summary><div class="question-preview">${a.expressions.map((expression, i) => `<span>${i + 1}.　${esc(expression)} = ?</span>`).join('')}</div></details>`;
 }
 function studentHome() {
   const pending = state.assignments.filter(a => !a.submittedAt && !closed(a)).length;
@@ -181,6 +209,8 @@ function render() {
   if (!state.user) view = loginView();
   else if (state.loading) view = '<p class="loading">正在打开作业本…</p>';
   else if (state.loadError) view = `<section class="empty panel"><h2>作业本暂时没有打开</h2><p>${esc(state.loadError)}</p><button class="button" data-action="refresh">重新加载</button><p><a href="#/">返回作业列表</a></p></section>`;
+  else if (state.reviewData) view = reviewView(state.reviewData);
+  else if (state.historyData) view = historyView(state.historyData);
   else if (routePath() === '#/students' && state.user.role === 'teacher') view = studentsView();
   else if (routePath() === '#/calendar' && state.user.role === 'teacher') view = calendarView(state.calendarData);
   else if (state.assignment) view = state.user.role === 'teacher' ? reportView(state.assignment) : workbook(state.assignment);
@@ -192,7 +222,7 @@ function render() {
 async function load() {
   if (!state.user) { render(); return; }
   const epoch = ++loadEpoch;
-  state.loading = true; state.loadError = ''; state.assignment = null; state.calendarData = null; state.calendarBack = null; render();
+  state.loading = true; state.loadError = ''; state.assignment = null; state.calendarData = null; state.calendarBack = null; state.historyData = null; state.reviewData = null; render();
   try {
     const path = routePath(), params = new URLSearchParams(location.hash.split('?')[1] ?? '');
     if (state.user.role === 'teacher') {
@@ -207,7 +237,25 @@ async function load() {
       if (!classes.some(c => c.id === state.classId)) state.classId = classes[0].id;
     }
     const match = path.match(/^#\/assignment\/([1-9]\d*)$/);
-    if (path === '#/calendar' && state.user.role === 'teacher') {
+    const reviewMatch = path.match(/^#\/assignment\/([1-9]\d*)\/student\/([1-9]\d*)$/);
+    const historyMatch = path.match(/^#\/students(?:\/([1-9]\d*))?\/history$/);
+    if (historyMatch && state.user.role === 'teacher') {
+      const students = await api(`/students?classId=${state.classId}`);
+      if (epoch !== loadEpoch) return;
+      state.students = students;
+      const studentId = historyMatch[1] || students[0]?.id;
+      const filters = recordFilters(params);
+      const data = studentId ? await api(`/students/${studentId}/history?${new URLSearchParams({ classId: String(state.classId), ...filters })}`) : { classId: state.classId, student: null, filters, assignments: [] };
+      if (epoch !== loadEpoch) return;
+      state.historyData = data;
+      if (!historyMatch[1] && studentId) history.replaceState(null, '', historyHref(studentId, data.filters));
+    } else if (reviewMatch && state.user.role === 'teacher') {
+      if (params.has('historyClassId') && !state.classes.some(c => c.id === Number(params.get('historyClassId')))) throw new Error('请选择有效班级');
+      const data = await api(`/assignments/${reviewMatch[1]}/students/${reviewMatch[2]}?classId=${state.classId}`);
+      if (epoch !== loadEpoch) return;
+      state.reviewData = data;
+      if (params.has('calendar')) state.calendarBack = reportHref(data.id);
+    } else if (path === '#/calendar' && state.user.role === 'teacher') {
       const query = new URLSearchParams({ classId: String(state.classId) });
       if (params.has('month')) query.set('month', params.get('month'));
       const data = await api(`/calendar?${query}`);
@@ -253,8 +301,14 @@ async function formAction(form, errorId, action) {
 root.addEventListener('submit', async event => {
   event.preventDefault();
   const form = event.target;
+  if (form.id === 'history-filter-form' && !state.busy) {
+    const filters = Object.fromEntries(new FormData(form));
+    if (filters.from && filters.to && filters.from > filters.to) { errorAt('history-error', '开始日期不能晚于结束日期'); return; }
+    const href = historyHref(state.historyData.student.id, filters);
+    if (location.hash === href) await load(); else location.hash = href;
+  }
   if (form.id === 'login-form') await formAction(form, 'login-error', async data => {
-    state.user = await api('/login', 'POST', data); state.dirty = false; state.assignments = []; state.students = []; state.importResult = null; state.studentQuery = ''; state.calendarData = null; state.calendarBack = null; state.assignment = null;
+    state.user = await api('/login', 'POST', data); state.dirty = false; state.assignments = []; state.students = []; state.importResult = null; state.studentQuery = ''; state.calendarData = null; state.calendarBack = null; state.historyData = null; state.reviewData = null; state.assignment = null;
     history.replaceState(null, '', '#/'); await load();
   });
   if (form.id === 'publish-form') await formAction(form, 'publish-error', async data => {
@@ -327,13 +381,16 @@ root.addEventListener('change', async event => {
   if (state.busy) return;
   if (event.target.name === 'currentClass') {
     state.classId = Number(event.target.value); state.importResult = null;
-    if (routePath() === '#/calendar' || routePath().startsWith('#/assignment/')) {
+    if (/^#\/students(?:\/\d+)?\/history$/.test(routePath())) {
+      history.replaceState(null, '', historyHref(null, recordFilters(routeParams())));
+    } else if (routePath() === '#/calendar' || routePath().startsWith('#/assignment/') || routeParams().has('classId')) {
       const params = new URLSearchParams(location.hash.split('?')[1] ?? ''); params.set('classId', String(state.classId));
       if (routePath() === '#/calendar' && state.calendarData) { params.set('month', state.calendarData.month); params.set('day', state.calendarDay); }
       history.replaceState(null, '', `${routePath()}?${params}`);
     }
     await load();
   }
+  if (event.target.name === 'historyStudent') location.hash = historyHref(Number(event.target.value), state.historyData.filters);
   if (event.target.name === 'calendarMonth' && event.target.value) { history.pushState(null, '', calendarHref(event.target.value)); await load(); }
   if (event.target.dataset.studentClass) {
     state.busy = true;
@@ -363,7 +420,7 @@ root.addEventListener('click', async event => {
   if (action === 'logout') {
     if (state.dirty && !confirm('还有未保存的答案。确定退出并放弃这些修改吗？')) return;
     state.busy = true;
-    try { await api('/logout', 'POST', {}); loadEpoch++; state.user = null; state.assignment = null; state.assignments = []; state.students = []; state.importResult = null; state.studentQuery = ''; state.calendarData = null; state.calendarBack = null; state.dirty = false; history.replaceState(null, '', '#/'); render(); }
+    try { await api('/logout', 'POST', {}); loadEpoch++; state.user = null; state.assignment = null; state.assignments = []; state.students = []; state.importResult = null; state.studentQuery = ''; state.calendarData = null; state.calendarBack = null; state.historyData = null; state.reviewData = null; state.dirty = false; history.replaceState(null, '', '#/'); render(); }
     catch (e) { toast(e.message, true); }
     finally { state.busy = false; }
   }

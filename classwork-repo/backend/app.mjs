@@ -4,6 +4,7 @@ import { openStore, hashPassword, verifyPassword, publishAssignment, solution, f
 import { mixedOptions, practiceOptions } from './questions.mjs';
 import { parseRoster, importRoster, rosterMaxBytes } from './roster.mjs';
 import { calendarMonth, beijingDateKey } from './calendar.mjs';
+import { historyFilters, matchesTopic, submissionStatus } from './records.mjs';
 
 class HttpError extends Error {
   constructor(status, message) { super(message); this.status = status; }
@@ -137,6 +138,24 @@ export async function createApp({ dbPath = 'data/classwork.sqlite', teacherPassw
       pending: students.length - submitted.length,
       average: submitted.length ? Math.round(submitted.reduce((sum, s) => sum + s.score, 0) / submitted.length * 10) / 10 : null };
   }
+  function student(id) {
+    const row = db.prepare("SELECT * FROM users WHERE id=? AND role='student'").get(id);
+    if (!row) fail(404, '学生不存在');
+    return row;
+  }
+  function review(a, studentId, classId) {
+    if (classId === null) fail(400, '请先选择班级');
+    if (!report(a, classId).students.some(s => s.id === studentId)) fail(404, '该学生不在本班这份作业的成绩名单中');
+    const pupil = student(studentId);
+    const s = db.prepare('SELECT * FROM submissions WHERE assignment_id=? AND student_id=?').get(a.id, studentId);
+    const answers = s ? JSON.parse(s.answers) : Array(a.questionCount).fill(null);
+    return { ...a, reviewClassId: classId, student: safeUser(pupil), status: submissionStatus(s),
+      savedAt: s?.saved_at ?? null, submittedAt: s?.submitted_at ?? null, score: s?.submitted_at ? s.score : null,
+      answers, results: a.questions.map((q, i) => {
+        const correctAnswer = solution(q);
+        return { correctAnswer, correct: s?.submitted_at ? answers[i] === correctAnswer : null };
+      }) };
+  }
   const server = createServer(async (req, res) => {
     const send = (status, value, headers = {}) => {
       res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8',
@@ -182,6 +201,35 @@ export async function createApp({ dbPath = 'data/classwork.sqlite', teacherPassw
       if (!user) fail(401, '请先登录');
       if (path === '/api/me' && req.method === 'GET') return send(200, safeUser(user));
       if (path === '/api/practice-options' && req.method === 'GET') { requireRole(user, 'teacher'); return send(200, practiceOptions); }
+      const historyMatch = path.match(/^\/api\/students\/([1-9]\d*)\/history$/);
+      if (historyMatch && req.method === 'GET') {
+        requireRole(user, 'teacher');
+        const classId = classFilter(url);
+        if (classId === null) fail(400, '请先选择班级');
+        const pupil = student(Number(historyMatch[1]));
+        if ((pupil.class_id ?? 1) !== classId) fail(404, '该学生不在当前班级');
+        const filters = historyFilters(url);
+        const rows = db.prepare(`SELECT a.*,s.saved_at,s.submitted_at,s.score FROM assignments a
+          LEFT JOIN submissions s ON s.assignment_id=a.id AND s.student_id=?
+          WHERE (?='' OR julianday(a.created_at)>=julianday(?)) AND (?='' OR julianday(a.created_at)<julianday(?)+1)
+          ORDER BY julianday(a.created_at) DESC,a.id DESC`).all(pupil.id, filters.from, `${filters.from}T00:00:00+08:00`, filters.to, `${filters.to}T00:00:00+08:00`);
+        const assignments = [];
+        for (const row of rows) {
+          const a = withClasses(row);
+          if (!canAccess(a, pupil) || !matchesTopic(a, filters.topic)) continue;
+          const reviewClassId = a.classIds.includes(classId) ? classId : 1;
+          assignments.push({ id: a.id, title: a.title, createdAt: a.createdAt, dueAt: a.dueAt, category: a.category,
+            questionCount: a.questionCount, knowledgePoints: a.knowledgePoints, knowledgePointNames: a.knowledgePointNames,
+            savedAt: row.saved_at ?? null, submittedAt: row.submitted_at ?? null, score: row.submitted_at ? row.score : null,
+            status: submissionStatus(row), reviewClassId, reviewClassName: a.classes.find(c => c.id === reviewClassId).name });
+        }
+        return send(200, { classId, student: safeUser(pupil), filters, timeZone: 'Asia/Shanghai', assignments });
+      }
+      const reviewMatch = path.match(/^\/api\/assignments\/([1-9]\d*)\/students\/([1-9]\d*)$/);
+      if (reviewMatch && req.method === 'GET') {
+        requireRole(user, 'teacher');
+        return send(200, review(assignment(Number(reviewMatch[1])), Number(reviewMatch[2]), classFilter(url)));
+      }
       if (path === '/api/calendar' && req.method === 'GET') {
         requireRole(user, 'teacher');
         const classId = classFilter(url);
