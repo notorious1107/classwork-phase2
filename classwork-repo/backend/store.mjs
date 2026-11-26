@@ -5,6 +5,7 @@ import { randomBytes, scrypt as scryptCallback, timingSafeEqual } from 'node:cry
 import { promisify } from 'node:util';
 import { paperOptions, generatePaper } from './papers.mjs';
 import { initializePreviews } from './preview-store.mjs';
+import { initializeAssignmentRoster } from './assignment-roster.mjs';
 export { categories, questionCounts } from './papers.mjs';
 
 const scrypt = promisify(scryptCallback);
@@ -168,6 +169,7 @@ export async function openStore(path, teacherPassword = 'Teacher123!') {
       );`);
     if (migratingClass) db.exec(`INSERT INTO assignment_classes SELECT id,1 FROM assignments;
       INSERT INTO legacy_assignment_students SELECT a.id,u.id FROM assignments a CROSS JOIN users u WHERE u.role='student';`);
+    initializeAssignmentRoster(db);
     db.exec('COMMIT');
   } catch (e) { db.exec('ROLLBACK'); throw e; }
   initializePreviews(db);

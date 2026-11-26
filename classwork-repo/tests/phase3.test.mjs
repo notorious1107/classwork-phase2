@@ -37,6 +37,74 @@ async function fixture(run) {
   } finally { await stop(); await rm(dir, { recursive: true, force: true }); }
 }
 
+test('转班后按发布时班级查原卷和成绩，多班同卷只计一次，新班的个人记录保留老卷', async () => {
+  await fixture(async ({ request, teacher, student, restart }) => {
+    const other = (await request('/classes', teacher, 'POST', { name: '二班' })).body.id;
+    const rain = await student('xiaoyu', 1), classmate = await student('classmate', other);
+    const publish = async (title, classIds) => (await request('/assignments', teacher, 'POST', { title, classIds })).body;
+    const solo = await publish('一班加减法', [1]), shared = await publish('两班同卷', [1, other]);
+    const answers = solo.questions.map(solution);
+    const submit = (work, values) => request(`/assignments/${work.id}/submit`, rain.cookie, 'POST', { answers: values });
+    const original = (await submit(solo, answers)).body;
+    assert.equal(original.score, 100);
+    assert.equal((await request(`/students/${rain.id}`, teacher, 'PUT', { classId: other })).status, 200);
+    // Submission after transfer must still use the class at publication, even for a zero score.
+    assert.equal((await submit(shared, shared.questions.map(q => solution(q) === 0 ? 1 : 0))).body.score, 0);
+    const later = await publish('转班后的二班练习', [other]);
+    const unrelated = await publish('转班后的一班新卷', [1]);
+    await restart();
+    for (const work of [solo, shared]) {
+      const score = work.id === solo.id ? 100 : 0;
+      const path = `/assignments/${work.id}`;
+      const report = (await request(path + '/report?classId=1', teacher)).body;
+      assert.deepEqual(report.students.map(s => s.id), [rain.id]);
+      assert.equal(report.submitted, 1); assert.equal(report.average, score);
+      const review = (await request(`${path}/students/${rain.id}?classId=1`, teacher)).body;
+      assert.equal(review.reviewClassId, 1); assert.equal(review.student.classId, other); assert.equal(review.score, score);
+      assert.equal((await request(`${path}/students/${rain.id}?classId=${other}`, teacher)).status, 404);
+    }
+    const secondReport = (await request(`/assignments/${shared.id}/report?classId=${other}`, teacher)).body;
+    assert.deepEqual(secondReport.students.map(s => s.id), [classmate.id]);
+    assert.equal(secondReport.average, null); assert.equal(secondReport.pending, 1);
+    const history = (await request(`/students/${rain.id}/history?classId=${other}`, teacher)).body.assignments;
+    assert.deepEqual(history.map(a => [a.id, a.reviewClassId]), [[later.id, other], [shared.id, 1], [solo.id, 1]]);
+    const personal = (await request(`/students/${rain.id}/history/${solo.id}?classId=${other}`, teacher)).body;
+    assert.deepEqual(personal.answers, answers); assert.equal(personal.submittedAt, original.submittedAt);
+    assert.equal((await request(`/students/${rain.id}/history/${unrelated.id}?classId=${other}`, teacher)).status, 404);
+    assert.equal((await request(`/students/${rain.id}/history/${solo.id}?classId=${other}`, classmate.cookie)).status, 403);
+    assert.deepEqual((await request('/assignments', rain.cookie)).body.map(a => a.id), [later.id, shared.id, solo.id]);
+    assert.deepEqual((await request(`/assignments/${solo.id}`, rain.cookie)).body.answers, answers);
+    assert.equal((await request(`/assignments/${solo.id}/draft`, rain.cookie, 'PUT', { answers })).status, 404);
+    assert.equal((await request(`/assignments/${solo.id}`, classmate.cookie)).status, 404);
+  });
+});
+
+test('旧多班库升级恢复单班原卷，无法归班的同卷保留个人记录，重复启动不改归属', async () => {
+  await fixture(async ({ db, request, teacher, student, restart }) => {
+    const second = (await request('/classes', teacher, 'POST', { name: '二班' })).body.id;
+    const third = (await request('/classes', teacher, 'POST', { name: '三班' })).body.id;
+    const rain = await student('xiaoyu', second);
+    const ids = [];
+    for (const classIds of [[second], [1, second]]) {
+      const work = (await request('/assignments', teacher, 'POST', { title: '旧库作业', classIds })).body;
+      ids.push(work.id);
+      assert.equal((await request(`/assignments/${work.id}/submit`, rain.cookie, 'POST', { answers: work.questions.map(solution) })).body.score, 100);
+    }
+    // Recreate the previous schema, which stored submissions and targets but no per-paper class.
+    db().exec('DROP TRIGGER roster_on_publication; DROP TRIGGER roster_on_enrollment; DROP TRIGGER roster_on_transfer; DROP TABLE assignment_roster');
+    db().prepare('UPDATE users SET class_id=? WHERE id=?').run(third, rain.id);
+    const original = db().prepare('SELECT * FROM submissions ORDER BY assignment_id').all();
+    await restart(); await restart();
+    const records = (await request(`/students/${rain.id}/history?classId=${third}`, teacher)).body.assignments;
+    assert.deepEqual(records.map(a => [a.id, a.reviewClassId]), [[ids[1], null], [ids[0], second]]);
+    assert.equal((await request(`/assignments/${ids[0]}/students/${rain.id}?classId=${second}`, teacher)).body.score, 100);
+    const personal = (await request(`/students/${rain.id}/history/${ids[1]}?classId=${third}`, teacher)).body;
+    assert.deepEqual(personal.answers, JSON.parse(original[1].answers)); assert.equal(personal.reviewClassId, null);
+    for (const classId of [1, second]) assert.equal((await request(`/assignments/${ids[1]}/report?classId=${classId}`, teacher)).body.total, 0);
+    assert.deepEqual(db().prepare('SELECT * FROM submissions ORDER BY assignment_id').all(), original);
+  });
+});
+
 test('个人限时：独立起点、幂等开始、全班截止取较早者及重启恢复', async () => {
   await fixture(async ({ request, teacher, student, time, restart }) => {
     const lin = await student('lin'), zhou = await student('zhou');

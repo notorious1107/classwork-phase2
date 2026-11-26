@@ -191,7 +191,7 @@ test('错题本只收首次已交错题，订正独立计次、幂等、隔离�
     assert.deepEqual(snapshot(db), originals);
     // Moving class does not erase the student's already submitted mistake sources.
     db.prepare('UPDATE users SET class_id=2 WHERE id=?').run(ids.students.learner);
-    assert.equal((await request(`/assignments/${ids.shared}`, learner)).status, 404);
+    assert.deepEqual((await request(`/assignments/${ids.shared}`, learner)).body.answers, ids.firstAnswers);
     assert.deepEqual((await request(base + '/original', learner)).body.answers, ids.firstAnswers);
     const afterMove = snapshot(db);
     const reopened = await restart();

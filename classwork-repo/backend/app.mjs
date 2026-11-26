@@ -119,10 +119,13 @@ export async function createApp({ dbPath = 'data/classwork.sqlite', teacherPassw
     const classes = db.prepare('SELECT c.id,c.name FROM classes c JOIN assignment_classes ac ON ac.class_id=c.id WHERE ac.assignment_id=? ORDER BY c.id').all(row.id);
     return { ...readAssignment(row), classes, classIds: classes.map(c => c.id) };
   }
-  function canAccess(a, user) {
+  function canWork(a, user) {
     return a.classIds.includes(user.class_id ?? 1) || !!db.prepare('SELECT 1 FROM legacy_assignment_students WHERE assignment_id=? AND student_id=?').get(a.id, user.id);
   }
-  function requireAccess(a, user) { if (user.role === 'student' && !canAccess(a, user)) fail(404, '作业不存在'); }
+  function canRead(a, user) {
+    return canWork(a, user) || !!db.prepare('SELECT 1 FROM submissions WHERE assignment_id=? AND student_id=? AND submitted_at IS NOT NULL').get(a.id, user.id);
+  }
+  function requireWorkAccess(a, user) { if (!canWork(a, user)) fail(404, '作业不存在'); }
   function currentStudent(user) { return db.prepare('SELECT * FROM users WHERE id=?').get(user.id); }
   function assignment(id) {
     const row = db.prepare('SELECT * FROM assignments WHERE id=?').get(id);
@@ -160,11 +163,11 @@ export async function createApp({ dbPath = 'data/classwork.sqlite', teacherPassw
     if (!row) fail(404, '学生不存在');
     return row;
   }
-  function review(a, studentId, classId) {
-    if (classId === null) fail(400, '请先选择班级');
-    if (!report(a, classId).students.some(s => s.id === studentId)) fail(404, '该学生不在本班这份作业的成绩名单中');
-    const pupil = student(studentId);
-    const s = db.prepare('SELECT * FROM submissions WHERE assignment_id=? AND student_id=?').get(a.id, studentId);
+  function rosterEntry(assignmentId, studentId) {
+    return db.prepare('SELECT class_id FROM assignment_roster WHERE assignment_id=? AND student_id=?').get(assignmentId, studentId);
+  }
+  function review(a, pupil, classId) {
+    const s = db.prepare('SELECT * FROM submissions WHERE assignment_id=? AND student_id=?').get(a.id, pupil.id);
     const answers = s ? JSON.parse(s.answers) : Array(a.questionCount).fill(null);
     return { ...a, reviewClassId: classId, student: safeUser(pupil), status: submissionStatus(s),
       savedAt: s?.saved_at ?? null, submittedAt: s?.submitted_at ?? null, score: s?.submitted_at ? s.score : null,
@@ -286,34 +289,43 @@ export async function createApp({ dbPath = 'data/classwork.sqlite', teacherPassw
         }
       }
       if (path === '/api/practice-options' && req.method === 'GET') { requireRole(user, 'teacher'); return send(200, practiceOptions); }
-      const historyMatch = path.match(/^\/api\/students\/([1-9]\d*)\/history$/);
+      const historyMatch = path.match(/^\/api\/students\/([1-9]\d*)\/history(?:\/([1-9]\d*))?$/);
       if (historyMatch && req.method === 'GET') {
         requireRole(user, 'teacher');
         const classId = classFilter(url);
         if (classId === null) fail(400, '请先选择班级');
         const pupil = student(Number(historyMatch[1]));
         if ((pupil.class_id ?? 1) !== classId) fail(404, '该学生不在当前班级');
+        if (historyMatch[2]) {
+          const a = assignment(Number(historyMatch[2])), entry = rosterEntry(a.id, pupil.id);
+          if (!entry) fail(404, '该学生没有这份作业的练习记录');
+          return send(200, review(a, pupil, entry.class_id));
+        }
         const filters = historyFilters(url);
-        const rows = db.prepare(`SELECT a.*,s.saved_at,s.submitted_at,s.score FROM assignments a
-          LEFT JOIN submissions s ON s.assignment_id=a.id AND s.student_id=?
-          WHERE (?='' OR julianday(a.created_at)>=julianday(?)) AND (?='' OR julianday(a.created_at)<julianday(?)+1)
+        const rows = db.prepare(`SELECT a.*,r.class_id AS reviewClassId,c.name AS reviewClassName,s.saved_at,s.submitted_at,s.score
+          FROM assignment_roster r JOIN assignments a ON a.id=r.assignment_id
+          LEFT JOIN classes c ON c.id=r.class_id LEFT JOIN submissions s USING(assignment_id,student_id)
+          WHERE r.student_id=? AND (?='' OR julianday(a.created_at)>=julianday(?)) AND (?='' OR julianday(a.created_at)<julianday(?)+1)
           ORDER BY julianday(a.created_at) DESC,a.id DESC`).all(pupil.id, filters.from, `${filters.from}T00:00:00+08:00`, filters.to, `${filters.to}T00:00:00+08:00`);
         const assignments = [];
         for (const row of rows) {
-          const a = withClasses(row);
-          if (!canAccess(a, pupil) || !matchesTopic(a, filters.topic)) continue;
-          const reviewClassId = a.classIds.includes(classId) ? classId : 1;
+          const a = readAssignment(row);
+          if (!matchesTopic(a, filters.topic)) continue;
           assignments.push({ id: a.id, title: a.title, createdAt: a.createdAt, dueAt: a.dueAt, category: a.category,
             questionCount: a.questionCount, knowledgePoints: a.knowledgePoints, knowledgePointNames: a.knowledgePointNames, components: a.components,
             savedAt: row.saved_at ?? null, submittedAt: row.submitted_at ?? null, score: row.submitted_at ? row.score : null,
-            status: submissionStatus(row), reviewClassId, reviewClassName: a.classes.find(c => c.id === reviewClassId).name });
+            status: submissionStatus(row), reviewClassId: row.reviewClassId, reviewClassName: row.reviewClassName });
         }
         return send(200, { classId, student: safeUser(pupil), filters, timeZone: 'Asia/Shanghai', assignments });
       }
       const reviewMatch = path.match(/^\/api\/assignments\/([1-9]\d*)\/students\/([1-9]\d*)$/);
       if (reviewMatch && req.method === 'GET') {
         requireRole(user, 'teacher');
-        return send(200, review(assignment(Number(reviewMatch[1])), Number(reviewMatch[2]), classFilter(url)));
+        const classId = classFilter(url);
+        if (classId === null) fail(400, '请先选择班级');
+        const a = assignment(Number(reviewMatch[1])), pupil = student(Number(reviewMatch[2]));
+        if (rosterEntry(a.id, pupil.id)?.class_id !== classId) fail(404, '该学生不在本班这份作业的成绩名单中');
+        return send(200, review(a, pupil, classId));
       }
       if (path === '/api/analytics' && req.method === 'GET') {
         requireRole(user, 'teacher');
@@ -417,7 +429,7 @@ export async function createApp({ dbPath = 'data/classwork.sqlite', teacherPassw
         if (req.method === 'GET') {
           let list = db.prepare('SELECT * FROM assignments ORDER BY id DESC').all().map(withClasses);
           const selected = user.role === 'teacher' ? classFilter(url) : null;
-          list = list.filter(a => user.role === 'teacher' ? selected === null || a.classIds.includes(selected) : canAccess(a, user));
+          list = list.filter(a => user.role === 'teacher' ? selected === null || a.classIds.includes(selected) : canRead(a, user));
           if (user.role === 'teacher') return send(200, list.map(a => report(a, selected)));
           const now = clock(), serverNow = new Date(now).toISOString();
           return send(200, list.map(a => ({ ...studentView(a, user.id, now), serverNow })));
@@ -436,12 +448,13 @@ export async function createApp({ dbPath = 'data/classwork.sqlite', teacherPassw
         if (action === 'report' && req.method === 'GET') {
           requireRole(user, 'teacher'); return send(200, report(a, classFilter(url)));
         }
-        requireAccess(a, user);
         if (!action && req.method === 'GET') {
+          if (user.role === 'student' && !canRead(a, user)) fail(404, '作业不存在');
           return send(200, user.role === 'teacher' ? report(a, classFilter(url)) : studentView(a, user.id));
         }
+        if (user.role === 'student') requireWorkAccess(a, user);
         if (action === 'start' && req.method === 'POST') {
-          requireRole(user, 'student'); await body(req); recheckSession(); requireAccess(a, currentStudent(user));
+          requireRole(user, 'student'); await body(req); recheckSession(); requireWorkAccess(a, currentStudent(user));
           const view = studentView(a, user.id);
           if (view.startedAt || view.submittedAt) return send(200, view);
           if (isClosed(a)) fail(409, '作业已截止，不能开始作答');
@@ -458,7 +471,7 @@ export async function createApp({ dbPath = 'data/classwork.sqlite', teacherPassw
           }
           const input = await body(req);
           recheckSession();
-          requireAccess(a, currentStudent(user));
+          requireWorkAccess(a, currentStudent(user));
           // A request may wait for its body while another request submits this work.
           const latest = studentView(a, user.id);
           if (latest.submittedAt) {

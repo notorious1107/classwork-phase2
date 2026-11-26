@@ -549,6 +549,42 @@ function seedRecords(app) {
   return { ...ids, mixed, lin: pupil('lin'), pendingStudent: pupil('pending'), zhou: pupil('zhou'), blank: pupil('blank') };
 }
 
+test('教师转班后能从原班成绩表和新班个人记录打开同一原卷，学生可自行回看', async () => {
+  await withPages(async ({ app, page, login }) => {
+    const ids = seedRecords(app), teacher = await page();
+    await login(teacher, 'teacher', 'Teacher123!');
+    teacher.click('nav a[href="#/students"]');
+    const transferSelect = `[data-student-class="${ids.lin}"]`;
+    await waitFor(() => teacher.d.querySelector(transferSelect), '找到原班学生');
+    const select = teacher.d.querySelector(transferSelect);
+    select.value = '2'; select.dispatchEvent(new teacher.w.Event('change', { bubbles: true }));
+    await waitFor(() => teacher.d.querySelector('#student-list') && !teacher.d.querySelector(transferSelect), '学生名单已转班');
+    teacher.w.location.hash = `#/assignment/${ids.shared}?classId=1`;
+    const rowLink = `.student-review-link[href*="student/${ids.lin}?"]`;
+    await waitFor(() => teacher.d.querySelector(rowLink), '原班仍有该生成绩');
+    teacher.click(rowLink);
+    await waitFor(() => teacher.d.querySelector('.review-total strong')?.textContent === '80', '查看原班的 80 分卷');
+    const answers = () => [...teacher.d.querySelectorAll('.review-student-answer')].map(el => el.textContent);
+    const original = answers();
+    teacher.click('.review-links a[href*="/history"]');
+    const entry = `[data-history-assignment="${ids.shared}"]`;
+    await waitFor(() => teacher.d.querySelector(entry), '转入班个人记录');
+    assert.equal(teacher.d.querySelector('[name="currentClass"]').value, '2');
+    assert.match(teacher.d.querySelector(entry).textContent, /原班级历史作业/);
+    teacher.click(entry);
+    await waitFor(() => teacher.d.querySelector('.review-total'), '从个人记录打开原卷');
+    assert.deepEqual(answers(), original);
+    assert.match(teacher.d.querySelector('.review-links a').getAttribute('href'), /classId=1/);
+    teacher.click('.back-link');
+    await waitFor(() => teacher.d.querySelector(entry), '返回新班个人记录');
+    const pupil = await page(); await login(pupil, 'lin', 'Teacher123!');
+    pupil.click(`.student-card[href="#/assignment/${ids.shared}"]`);
+    await waitFor(() => pupil.d.querySelector('.score-stamp strong')?.textContent === '80', '学生自己的已交原卷');
+    assert.equal(pupil.d.querySelector('#answer-0').value, original[0]);
+    assert.equal(pupil.d.querySelector('#answer-0').matches(':disabled'), true);
+  });
+});
+
 test('教师从成绩姓名查看原卷和未评分草稿，刷新、成绩表与月历往返保持上下文', async () => {
   await withPages(async ({ app, page, login }) => {
     const ids = seedRecords(app), teacher = await page(); await login(teacher, 'teacher', 'Teacher123!');
