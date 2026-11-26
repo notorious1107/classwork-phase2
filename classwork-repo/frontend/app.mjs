@@ -39,7 +39,7 @@ function toast(message, error = false) {
   clearTimeout(toastTimer); notice.textContent = message; notice.classList.toggle('error', error); notice.hidden = false;
   toastTimer = setTimeout(() => { notice.hidden = true; }, error ? 8000 : 4000);
 }
-async function api(path, method = 'GET', data) {
+async function apiResponse(path, method = 'GET', data) {
   const user = state.user;
   const headers = data === undefined ? {} : { 'Content-Type': 'application/json' };
   if (user) headers['X-Classwork-User'] = String(user.id);
@@ -48,9 +48,8 @@ async function api(path, method = 'GET', data) {
     response = await fetch(`/api${path}`, { method, credentials: 'same-origin', headers,
       body: data === undefined ? undefined : JSON.stringify(data) });
   } catch { throw new Error('连接失败，请检查网络后重试。未保存的答案仍保留在本页。'); }
-  const result = await response.json();
-  for (const a of Array.isArray(result) ? result : [result]) if (a.serverNow) a.receivedAt = performance.now();
   if (!response.ok) {
+    const result = await response.json();
     if (response.status === 401 && user && state.user === user) {
       rememberEdits();
       activeRecovery = null;
@@ -60,6 +59,12 @@ async function api(path, method = 'GET', data) {
     }
     throw Object.assign(new Error(result.error || '操作失败，请重试'), { status: response.status, code: result.code, draftRevision: result.draftRevision, answers: result.answers });
   }
+  return response;
+}
+async function api(path, method, data) {
+  const response = await apiResponse(path, method, data);
+  const result = await response.json();
+  for (const a of Array.isArray(result) ? result : [result]) if (a.serverNow) a.receivedAt = performance.now();
   return result;
 }
 function badge(a, now) {
@@ -357,8 +362,26 @@ function fileBase64(file) {
   });
 }
 function reportView(a) {
-  return `<a class="back-link" href="${state.calendarBack ?? '#/'}">← ${state.calendarBack ? '返回练习月历' : '返回班级作业'}</a>${classPicker(a.classes)}${pageTitle('作业成绩', esc(a.title), `${assignmentSummary(a)} · 满分 100 分 · ${date(a.createdAt)} 发布 · ${deadline(a)}`, '<button class="button secondary" data-action="refresh">刷新成绩 ↻</button>')}
+  const actions = '<div class="actions report-actions"><button type="button" class="button" data-action="export-grades">导出 Excel 成绩表</button><button class="button secondary" data-action="refresh">刷新成绩 ↻</button></div>';
+  return `<a class="back-link" href="${state.calendarBack ?? '#/'}">← ${state.calendarBack ? '返回练习月历' : '返回班级作业'}</a>${classPicker(a.classes)}${pageTitle('作业成绩', esc(a.title), `${assignmentSummary(a)} · 满分 100 分 · ${date(a.createdAt)} 发布 · ${deadline(a)}`, actions)}
     <div id="report-progress">${reportProgress(a)}</div><details class="panel questions-details"><summary>查看本次题目（${a.questionCount} 题）</summary><div class="question-preview">${a.expressions.map((expression, i) => `<span>${i + 1}.　${esc(expression)} = ?</span>`).join('')}</div></details>`;
+}
+async function exportGrades(button) {
+  const { id, reportClassId } = state.assignment;
+  button.disabled = true;
+  try {
+    const response = await apiResponse(`/assignments/${id}/report.xlsx?classId=${reportClassId}`);
+    const blob = await response.blob();
+    if (!button.isConnected) return;
+    const filename = response.headers.get('Content-Disposition')?.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+    const link = document.createElement('a');
+    link.download = filename ? decodeURIComponent(filename) : '作业成绩.xlsx';
+    link.href = URL.createObjectURL(blob);
+    document.body.append(link);
+    link.click(); link.remove();
+    setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+  } catch (e) { if (button.isConnected) toast(e.message, true); }
+  finally { button.disabled = false; }
 }
 function reportProgress(a) {
   const now = assignmentNow(a);
@@ -943,6 +966,7 @@ root.addEventListener('click', async event => {
     draftConflict = null; document.querySelector('#draft-conflict').hidden = true; await saveDraft(true);
   }
   if (action === 'analytics-list') document.querySelector('#analytics-list')?.scrollIntoView?.({ block: 'start' });
+  if (action === 'export-grades') await exportGrades(event.target.closest('button'));
   if (event.target.closest('[data-analytics-question]')?.getAttribute('href') === location.hash) { event.preventDefault(); document.querySelector('#analytics-detail')?.scrollIntoView?.({ block: 'start' }); }
   if (action === 'save') await saveDraft(true);
   if (action === 'save-leave') await saveAndLeave();

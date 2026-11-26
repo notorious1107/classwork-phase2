@@ -20,6 +20,7 @@
   },
   "dependencies": {
     "read-excel-file": "9.3.20",
-    "unzipper-esm": "0.13.3"
+    "unzipper-esm": "0.13.3",
+    "write-excel-file": "4.1.1"
   }
 }

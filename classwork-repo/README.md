@@ -8,7 +8,7 @@
 
 ## 启动和停止
 
-需要 Node.js 22.13+（本机已用 22.17.0 验证）。首次使用或更新后先安装锁定的依赖；运行时读取 Excel 名单需要 read-excel-file 和 unzipper-esm，无需配置数据库服务。
+需要 Node.js 22.13+（本机已用 22.17.0 验证）。首次使用或更新后先安装锁定的依赖；运行时读取 Excel 名单使用 read-excel-file 和 unzipper-esm，导出成绩使用 write-excel-file，无需配置数据库服务。
 
 在含有 `package.json` 的项目目录打开 PowerShell，运行以下命令。
 
@@ -117,6 +117,10 @@ npm start
 教师接口 `POST /api/analytics/remedial-previews` 接收 `classId`、`assignmentId`、从 1 开始的 `questionNumber` 和 `studentIds`。服务端核对原交卷，将预览题目和接收名单一起保存。`POST /api/analytics/remedial-previews/:previewId/publish` 发布该教师的预览，重复确认返回同一作业编号。
 
 ## 查看学生原卷和个人记录
+
+打开一份作业的成绩页，选择要带去教研会的班级，点「导出 Excel 成绩表」。下载的 `.xlsx` 文件以班级和作业名称命名，每名学生一行，列出学号、姓名、班级、作业、提交状态、北京时间提交时间和百分制成绩。学号按文本保存，`00123` 的前导零会保留。已交白卷的成绩为数字 `0`，草稿和尚未作答的成绩格为空，方便在 Excel 中筛选和计算均分。
+
+导出使用这份作业在所选班级的成绩名单，包含已转班但成绩归属原班的学生，定向补练只列接收人。教师下载接口为 `GET /api/assignments/:id/report.xlsx?classId=…`。
 
 学生作业列表和教师成绩明细使用同一套提交截止规则。成绩接口 `GET /api/assignments/:id/report?classId=…` 为每位学生返回开始时间 `startedAt`、实际截止时间 `effectiveDueAt`、截止来源 `deadlineSource`（`personal`、`class` 或空）和到期状态 `isClosed`。查看列表和成绩表均不会启动个人计时。
 

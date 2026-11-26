@@ -80,6 +80,7 @@ select{font:inherit;display:block;width:100%;border:1px solid #cbd6e8;border-rad
 .history-filters form{display:flex;align-items:end;gap:16px;flex-wrap:wrap}
 .history-filters form label{flex:1;min-width:170px}
 .history-filters .actions{flex-wrap:wrap}
+.report-actions{flex-wrap:wrap}
 .history-filters .form-error{width:100%;margin:0}
 .history-list{display:grid;gap:14px}
 .history-item{display:grid;grid-template-columns:minmax(0,1fr) 180px 90px;gap:18px;background:white;border:1px solid var(--line);border-radius:12px;padding:24px;align-items:center}

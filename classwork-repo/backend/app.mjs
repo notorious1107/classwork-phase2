@@ -7,6 +7,7 @@ import { readPreview, createPreview, publishPreview } from './previews.mjs';
 import { parseRoster, importRoster, rosterMaxBytes } from './roster.mjs';
 import { calendarMonth, beijingDateKey } from './calendar.mjs';
 import { assignmentStudents } from './reporting.mjs';
+import { gradeWorkbook } from './grade-export.mjs';
 import { createRemedialPreview, pendingRemedialPreview, publishRemedialPreview } from './remediation.mjs';
 import { analyticsFilters, analyticsSelection, aggregatePractice } from './analytics.mjs';
 import { historyFilters, matchesTopic, submissionStatus } from './records.mjs';
@@ -457,6 +458,20 @@ export async function createApp({ dbPath = 'data/classwork.sqlite', teacherPassw
           const id = publishAssignment(db, settings.title, settings);
           return send(201, report(assignment(id)));
         }
+      }
+      const exportMatch = path.match(/^\/api\/assignments\/([1-9]\d*)\/report\.xlsx$/);
+      if (exportMatch && req.method === 'GET') {
+        requireRole(user, 'teacher');
+        const classId = classFilter(url);
+        if (classId === null) fail(400, '请选择要导出的班级');
+        const { buffer, disposition } = await gradeWorkbook(report(assignment(Number(exportMatch[1])), classId));
+        recheckSession();
+        res.writeHead(200, {
+          'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          'Content-Disposition': disposition, 'Content-Length': buffer.length,
+          'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff'
+        });
+        return res.end(buffer);
       }
       const match = path.match(/^\/api\/assignments\/([1-9]\d*)(?:\/(draft|submit|report|start))?$/);
       if (match) {

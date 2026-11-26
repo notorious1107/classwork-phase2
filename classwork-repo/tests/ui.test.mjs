@@ -4,6 +4,7 @@ import { readFile, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { JSDOM } from 'jsdom';
+import { readSheet } from 'read-excel-file/node';
 import { createApp } from '../backend/app.mjs';
 import { createWebServer } from '../frontend/server.mjs';
 import { solution, publishAssignment } from '../backend/store.mjs';
@@ -582,6 +583,40 @@ test('教师转班后能从原班成绩表和新班个人记录打开同一原�
     await waitFor(() => pupil.d.querySelector('.score-stamp strong')?.textContent === '80', '学生自己的已交原卷');
     assert.equal(pupil.d.querySelector('#answer-0').value, original[0]);
     assert.equal(pupil.d.querySelector('#answer-0').matches(':disabled'), true);
+  });
+});
+
+test('教师在成绩页切班导出对应 Excel，下载失败可在原页重试', async () => {
+  await withPages(async ({ app, page, login }) => {
+    const {a} = seedAnalytics(app.db), teacher = await page();
+    await login(teacher,'teacher','Teacher123!');
+    teacher.w.location.hash = `#/assignment/${a}?classId=1`;
+    const button = '[data-action="export-grades"]', downloads = [];
+    let blob;
+    teacher.w.URL.createObjectURL = file => { blob = file; return 'blob:grade-export'; };
+    teacher.w.URL.revokeObjectURL = () => {};
+    teacher.d.addEventListener('click', event => {
+      const link = event.target.closest('a[download]');
+      if (link) { event.preventDefault(); downloads.push({filename:link.download, blob}); }
+    });
+    await waitFor(()=>teacher.d.querySelector(button), '成绩导出入口');
+    teacher.session.failPath = '/report.xlsx'; teacher.click(button);
+    await waitFor(()=>teacher.d.querySelector('#notice').textContent.includes('连接失败') && !teacher.d.querySelector(button).disabled, '导出重试');
+    assert.equal(downloads.length,0); teacher.session.failPath = '';
+    teacher.click(button); await waitFor(()=>downloads.length === 1, '一班下载');
+    const picker = teacher.d.querySelector('[name="currentClass"]');
+    picker.value = '2'; picker.dispatchEvent(new teacher.w.Event('change',{bubbles:true}));
+    await waitFor(()=>teacher.d.querySelector('.score-cell')?.textContent === '40', '切换二班成绩');
+    teacher.click(button); await waitFor(()=>downloads.length === 2, '二班下载');
+    for (const [index,name,students] of [[0,'一班',['lin','nan','draft','blank']],[1,'二班',['zhou']]]) {
+      assert.ok(downloads[index].filename.startsWith(name+'-'));
+      const rows = await readSheet(Buffer.from(await downloads[index].blob.arrayBuffer()));
+      assert.deepEqual(rows.slice(1).map(r=>r[0]),students);
+    }
+    const pupil = await page(); await login(pupil,'lin','Teacher123!');
+    pupil.w.location.hash = `#/assignment/${a}`;
+    await waitFor(()=>pupil.d.querySelector('.score-stamp'), '学生原卷');
+    assert.equal(pupil.d.querySelector(button),null);
   });
 });
 
