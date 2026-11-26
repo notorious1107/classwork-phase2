@@ -79,6 +79,24 @@ function binaryQuestions(category, count, difficulty) {
     return q;
   });
 }
+export function binaryVariants(source, difficulty, count) {
+  const op = ({ '＋': '+', '−': '-', '×': '*', '÷': '/' })[source.op] ?? source.op;
+  const kind = addSubPracticeKind(source);
+  const difficultyForType = kind ? (regroups(source) ? 'advanced' : 'basic') : difficulty;
+  const pool = binaryPool(op, difficultyForType);
+  const nontrivial = q => q.a > 0 && q.b > 0 && (op !== '-' || q.a !== q.b)
+    && (op !== '*' || (q.a > 1 && q.b > 1)) && (op !== '/' || (q.b > 1 && q.a !== q.b));
+  const preferred = pool.filter(nontrivial);
+  const seen = new Set(), questions = [];
+  const key = q => (op === '+' || op === '*') && q.a > q.b ? `${q.b},${q.a}` : `${q.a},${q.b}`;
+  seen.add(key(source));
+  for (const q of [...preferred, ...pool]) {
+    if (seen.has(key(q))) continue;
+    seen.add(key(q)); questions.push(q);
+    if (questions.length === count) break;
+  }
+  return questions;
+}
 export function generatePaper(options) {
   const { selectedCategories, questionCount } = options, questions = [], questionCategories = [], components = [];
   selectedCategories.forEach((category, index) => {

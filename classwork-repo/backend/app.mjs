@@ -7,6 +7,7 @@ import { readPreview, createPreview, publishPreview } from './previews.mjs';
 import { parseRoster, importRoster, rosterMaxBytes } from './roster.mjs';
 import { calendarMonth, beijingDateKey } from './calendar.mjs';
 import { assignmentStudents } from './reporting.mjs';
+import { createRemedialPreview, pendingRemedialPreview, publishRemedialPreview } from './remediation.mjs';
 import { analyticsFilters, analyticsSelection, aggregatePractice } from './analytics.mjs';
 import { historyFilters, matchesTopic, submissionStatus } from './records.mjs';
 import { mistakeBook, mistakeSource, correctionQuestion, correctionHistory, submitCorrection, startPractice, practiceQuestion } from './corrections.mjs';
@@ -117,9 +118,11 @@ export async function createApp({ dbPath = 'data/classwork.sqlite', teacherPassw
   }
   function withClasses(row) {
     const classes = db.prepare('SELECT c.id,c.name FROM classes c JOIN assignment_classes ac ON ac.class_id=c.id WHERE ac.assignment_id=? ORDER BY c.id').all(row.id);
-    return { ...readAssignment(row), classes, classIds: classes.map(c => c.id) };
+    const source = db.prepare('SELECT source_assignment_id AS assignmentId,question_number AS questionNumber FROM remedial_assignments WHERE assignment_id=?').get(row.id);
+    return { ...readAssignment(row), classes, classIds: classes.map(c => c.id), ...(source ? { remediationSource: source } : {}) };
   }
   function canWork(a, user) {
+    if (a.remediationSource) return !!rosterEntry(a.id, user.id);
     return a.classIds.includes(user.class_id ?? 1) || !!db.prepare('SELECT 1 FROM legacy_assignment_students WHERE assignment_id=? AND student_id=?').get(a.id, user.id);
   }
   function canRead(a, user) {
@@ -337,8 +340,22 @@ export async function createApp({ dbPath = 'data/classwork.sqlite', teacherPassw
           AND (?='' OR julianday(a.created_at)<julianday(?)+1)
           ORDER BY julianday(a.created_at) DESC,a.id DESC`).all(classId, filters.from, `${filters.from}T00:00:00+08:00`, filters.to, `${filters.to}T00:00:00+08:00`);
         const papers = rows.map(row => { const a = withClasses(row); return { assignment: a, students: assignmentStudents(db, a, classId, true) }; });
+        const data = aggregatePractice(papers, selection);
+        if (selection) data.selectedQuestion.remedialPreview = pendingRemedialPreview(db, user.id, classId, selection.assignmentId, selection.questionNumber);
         return send(200, { classId, className: db.prepare('SELECT name FROM classes WHERE id=?').get(classId).name,
-          filters, timeZone: 'Asia/Shanghai', ...aggregatePractice(papers, selection) });
+          filters, timeZone: 'Asia/Shanghai', ...data });
+      }
+      if (path === '/api/analytics/remedial-previews' && req.method === 'POST') {
+        requireRole(user, 'teacher');
+        const input = await body(req); recheckSession();
+        if (!Number.isSafeInteger(input.assignmentId) || input.assignmentId < 1) fail(400, '请选择来源作业');
+        return send(201, createRemedialPreview(db, user.id, assignment(input.assignmentId), input));
+      }
+      const remedialMatch = path.match(/^\/api\/analytics\/remedial-previews\/([a-zA-Z0-9-]+)\/publish$/);
+      if (remedialMatch && req.method === 'POST') {
+        requireRole(user, 'teacher'); await body(req); recheckSession();
+        const result = publishRemedialPreview(db, user.id, remedialMatch[1], assignment, clock());
+        return send(result.created ? 201 : 200, { id: result.id });
       }
       if (path === '/api/calendar' && req.method === 'GET') {
         requireRole(user, 'teacher');

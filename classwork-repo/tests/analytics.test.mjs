@@ -4,7 +4,9 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createApp } from '../backend/app.mjs';
-import { publishAssignment, solution } from '../backend/store.mjs';
+import { formatExpression, publishAssignment, solution } from '../backend/store.mjs';
+import { addSubPracticeKind, binaryVariants } from '../backend/papers.mjs';
+import { mixedVariants } from '../backend/questions.mjs';
 import { seedAnalytics } from './analytics-fixture.mjs';
 import { createHistoryClass, teacherPassword, snapshot } from './history-fixture.mjs';
 
@@ -13,8 +15,8 @@ async function withAnalytics(run, legacy=false) {
   if (legacy) await createHistoryClass(dbPath);
   const app = await createApp({dbPath,clock:()=>Date.parse('2026-11-23T16:05:00Z')});
   await new Promise(resolve=>app.server.listen(0,'127.0.0.1',resolve));
-  const request = async (path, cookie, data) => {
-    const r = await fetch(`http://127.0.0.1:${app.server.address().port}/api${path}`,{method:data?'POST':'GET',headers:{...(cookie?{Cookie:cookie}:{}),...(data?{'Content-Type':'application/json'}:{})},...(data?{body:JSON.stringify(data)}:{})});
+  const request = async (path, cookie, data, method = data ? 'POST' : 'GET') => {
+    const r = await fetch(`http://127.0.0.1:${app.server.address().port}/api${path}`,{method,headers:{...(cookie?{Cookie:cookie}:{}),...(data?{'Content-Type':'application/json'}:{})},...(data?{body:JSON.stringify(data)}:{})});
     return {status:r.status,body:await r.json(),cookie:r.headers.get('set-cookie')?.split(';')[0]};
   };
   const login = async (username='teacher',password=legacy?teacherPassword:'Teacher123!') => {
@@ -24,6 +26,76 @@ async function withAnalytics(run, legacy=false) {
   finally {app.server.closeAllConnections(); await new Promise(resolve=>app.server.close(resolve));app.db.close();await rm(dir,{recursive:true,force:true});}
 }
 const range = '/analytics?classId=1&from=2026-11-17&to=2026-11-19';
+
+test('补练保持加减进退位、乘除运算和混合运算的括号结构，卷内无原题或重复算式', () => {
+  for (const [a,op,b] of [[18,'−',5],[11,'-',9],[6,'＋',8],[2,'+',4],[4,'×',3],[18,'÷',3]]) {
+    const source = {a,op,b}, questions = binaryVariants(source,'advanced',5);
+    const expressions = questions.map(q=>formatExpression(q));
+    assert.equal(new Set(expressions).size,5); assert.ok(!expressions.includes(formatExpression(source)));
+    assert.ok(questions.every(q => formatExpression(q).split(' ')[1] === formatExpression(source).split(' ')[1]
+      && addSubPracticeKind(q) === addSubPracticeKind(source) && Number.isInteger(solution(q)) && solution(q)>=0 && solution(q)<=20));
+  }
+  for (const source of [{a:24,op:'÷',b:{a:12,op:'/',b:3}}, {a:{a:{a:4,op:'+',b:6},op:'*',b:3},op:'-',b:8}]) {
+    const questions = mixedVariants(source,5,formatExpression), expressions = questions.map(q=>formatExpression(q));
+    assert.equal(new Set(expressions).size,5); assert.ok(!expressions.includes(formatExpression(source)));
+    function verify(node) {
+      const n = solution(node); assert.ok(Number.isInteger(n) && n>=0 && n<=100);
+      if (typeof node !== 'number') { verify(node.a); verify(node.b); }
+    }
+    for (const q of questions) { verify(q); assert.equal(formatExpression(q).replace(/\d+/g,'n'), formatExpression(source).replace(/\d+/g,'n')); }
+  }
+});
+
+test('从常错题点名预览再发布，原卷与普通预览独立，定向权限覆盖列表、读写与后来入班学生', async () => {
+  await withAnalytics(async ({ db, request, login }) => {
+    const {ids,a} = seedAnalytics(db), teacher = await login(), lin = await login('lin'), nan = await login('nan');
+    const draftPupil = await login('draft'), outsider = await login('zhou');
+    const original = db.prepare('SELECT * FROM submissions ORDER BY assignment_id,student_id').all();
+    const path = '/analytics/remedial-previews', settings = { assignmentId:a, questionNumber:1, classId:1, studentIds:[ids.lin] };
+    const regular = (await request('/assignment-previews',teacher,{ title:'尚未发布的全班卷' })).body;
+    assert.equal((await request(path,lin,settings)).status,403);
+    for (const studentIds of [[],[ids.lin,ids.lin],[ids.nan],[ids.draft],[ids.blank],[ids.zhou],[ids.lin,ids.nan]]) {
+      assert.equal((await request(path,teacher,{...settings,studentIds})).status,400);
+    }
+    const selected = (await request(path,teacher,settings)).body;
+    const publish = preview => `${path}/${preview.previewId}/publish`;
+    assert.equal(selected.expressions.length,5);
+    assert.deepEqual(selected.studentIds,[ids.lin]);
+    assert.equal(new Set(selected.expressions).size,5);
+    assert.ok(selected.expressions.every(e => e.includes('−') && e !== '8 − 8'));
+    const detail = (await request(range + `&assignmentId=${a}&questionNumber=1`,teacher)).body.selectedQuestion;
+    assert.deepEqual(detail.remedialPreview,selected);
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM assignments').get().n,2);
+    const replacement = (await request(path,teacher,settings)).body;
+    assert.equal((await request(publish(selected),teacher,{})).status,409);
+    assert.equal((await request(publish(replacement),lin,{})).status,403);
+    const responses = await Promise.all([request(publish(replacement),teacher,{}),request(publish(replacement),teacher,{})]);
+    assert.deepEqual(responses.map(r=>r.status).sort(),[200,201]); assert.equal(responses[0].body.id,responses[1].body.id);
+    const id = responses[0].body.id, work = `/assignments/${id}`, view = (await request(work,lin)).body;
+    assert.deepEqual(view.expressions,replacement.expressions);
+    assert.deepEqual(view.remediationSource,{assignmentId:a,questionNumber:1});
+    assert.equal((await request('/assignment-previews/current',teacher)).body.preview.previewId,regular.previewId);
+    assert.deepEqual(db.prepare('SELECT * FROM submissions ORDER BY assignment_id,student_id').all(),original);
+    for (const cookie of [nan,draftPupil,outsider]) {
+      assert.ok(!(await request('/assignments',cookie)).body.some(row=>row.id===id));
+      for (const [suffix,data,method] of [['',undefined,'GET'],['/start',{},'POST'],['/draft',{answers:[1,2,3,4,5]},'PUT'],['/submit',{answers:[1,2,3,4,5]},'POST']])
+        assert.equal((await request(work+suffix,cookie,data,method)).status,404);
+    }
+    const newcomer = await request('/students',teacher,{username:'late01',name:'后来入班',classId:1,password:'Teacher123!'});
+    assert.equal(newcomer.status,201); assert.equal((await request(work,await login('late01'))).status,404);
+    await request(`/students/${ids.zhou}`,teacher,{classId:1},'PUT');
+    assert.equal((await request(work,outsider)).status,404);
+    const answers = view.questions.map(solution);
+    assert.equal((await request(work+'/draft',lin,{answers},'PUT')).status,200);
+    assert.equal((await request(work+'/submit',lin,{answers})).body.score,100);
+    const report = (await request(work+'/report?classId=1',teacher)).body;
+    assert.deepEqual(report.students.map(s=>s.id),[ids.lin]); assert.equal(report.average,100);
+    assert.equal((await request(`/students/${ids.nan}/history?classId=1`,teacher)).body.assignments.some(row=>row.id===id),false);
+    // A submitted blank counts among the source question's errors, but an unsubmitted draft does not.
+    assert.equal((await request(path,teacher,{...settings,questionNumber:2})).status,201);
+    assert.equal((await request(path,teacher,{...settings,questionNumber:2,studentIds:[ids.draft]})).status,400);
+  });
+});
 
 test('班级学情按原分数逐份加权，逐题区分答错、漏答、未交和数字零；订正不改变首次统计', async()=> {
   await withAnalytics(async({db,request,login})=>{

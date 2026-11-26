@@ -35,6 +35,35 @@ const pools = Object.fromEntries(['+', '-', '*', '/'].map(op => {
   return [op, list];
 }));
 const pick = list => list[randomInt(list.length)];
+
+// For each subexpression, remember which operand values can produce each result.
+// Sampling from these choices keeps the original brackets and operator order, including nested division.
+export function mixedVariants(source, count, expression) {
+  const leaf = new Map(Array.from({ length: 100 }, (_, i) => [i + 1, null]));
+  function choices(node) {
+    if (typeof node === 'number') return { results: leaf };
+    const op = ({ '＋': '+', '−': '-', '×': '*', '÷': '/' })[node.op] ?? node.op;
+    const left = choices(node.a), right = choices(node.b), results = new Map();
+    for (const a of left.results.keys()) for (const b of right.results.keys()) {
+      if (!meaningful(op, a, b)) continue;
+      const result = apply(op, a, b);
+      if (!results.has(result)) results.set(result, []);
+      results.get(result).push([a,b]);
+    }
+    return { left, right, op, results };
+  }
+  function draw(node, result) {
+    if (!node.op) return result;
+    const [a,b] = pick(node.results.get(result));
+    return { a: draw(node.left, a), op: node.op, b: draw(node.right, b) };
+  }
+  const tree = choices(source), values = [...tree.results.keys()], seen = new Set([expression(source)]), questions = [];
+  for (let attempt = 0; values.length && questions.length < count && attempt < count * 100; attempt++) {
+    const q = draw(tree, pick(values)), key = expression(q);
+    if (!seen.has(key)) { questions.push(q); seen.add(key); }
+  }
+  return questions;
+}
 function extend(inner, op) {
   const a = value(inner);
   const candidates = [];

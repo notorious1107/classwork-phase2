@@ -33,13 +33,18 @@ export function publishAssignment(db, title, { category = 'add-sub-20', question
   } catch (e) { db.exec('ROLLBACK'); throw e; }
 }
 // Call inside a transaction so a preview publication and its published id are committed together.
-export function insertAssignment(db, options, paper, createdAt = new Date().toISOString()) {
+export function insertAssignment(db, options, paper, createdAt = new Date().toISOString(), remediation = null) {
   const result = db.prepare(`INSERT INTO assignments(title,questions,created_at,category,due_at,time_limit_minutes,question_count,difficulty,mixed_grade,knowledge_points,selected_categories,question_categories)
     VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`).run(options.title, JSON.stringify(paper.questions), createdAt, options.category, options.dueAt ?? null, options.timeLimitMinutes ?? null,
       paper.questions.length, options.difficulty, options.grade, options.knowledgePoints.length ? JSON.stringify(options.knowledgePoints) : null,
       JSON.stringify(options.selectedCategories), JSON.stringify(paper.questionCategories));
   const id = Number(result.lastInsertRowid);
+  if (remediation) db.prepare('INSERT INTO remedial_assignments VALUES(?,?,?)').run(id, remediation.assignmentId, remediation.questionNumber);
   for (const classId of options.classIds) db.prepare('INSERT INTO assignment_classes(assignment_id,class_id) VALUES(?,?)').run(id, classId);
+  if (remediation) {
+    const enroll = db.prepare('INSERT INTO assignment_roster(assignment_id,student_id,class_id) VALUES(?,?,?)');
+    for (const studentId of remediation.studentIds) enroll.run(id, studentId, remediation.classId);
+  }
   return id;
 }
 export function questionCategoriesFor(row, questions = JSON.parse(row.questions)) {

@@ -689,6 +689,39 @@ test('学生原卷与记录断网可重试，跨班或学生账号不能查看�
   }, undefined, { clock: () => Date.parse('2026-11-24T08:00:00Z') });
 });
 
+test('在错题明细勾选部分学生，修改名单后重新预览，补练只在所选学生首页出现', async () => {
+  await withPages(async ({ app, page, login }) => {
+    const {a,ids,key} = seedAnalytics(app.db);
+    app.db.prepare('UPDATE submissions SET answers=?,score=90 WHERE assignment_id=? AND student_id=?')
+      .run(JSON.stringify([null,...key.slice(1)]),a,ids.nan);
+    const teacher = await page(); await login(teacher,'teacher','Teacher123!');
+    teacher.w.location.hash = `#/analytics?classId=1&from=&to=&assignmentId=${a}&questionNumber=1`;
+    await waitFor(() => teacher.d.querySelector('#remedial-form'), '错题下的补练表单');
+    assert.deepEqual([...teacher.d.querySelectorAll('[name="recipient"]')].map(el=>Number(el.value)),[ids.lin,ids.nan]);
+    const select = id => teacher.click(`[name="recipient"][value="${id}"]`);
+    const generate = '#remedial-form button[value="preview"]', confirm = '#remedial-form button[value="publish"]';
+    assert.equal(teacher.d.querySelector(generate).disabled,true);
+    select(ids.lin); teacher.click(generate);
+    await waitFor(() => teacher.d.querySelector(confirm), '预览新卷');
+    select(ids.nan); assert.equal(teacher.d.querySelector(confirm).disabled,true);
+    select(ids.lin); teacher.click(generate);
+    await waitFor(() => teacher.d.querySelector('#remedial-preview p')?.textContent.includes('（nan）'), '重新预览选定名单');
+    const questions = [...teacher.d.querySelectorAll('#remedial-preview li strong')].map(el=>el.textContent);
+    assert.equal(questions.length,5);
+    const restored = await page(teacher.session,teacher.w.location.hash);
+    assert.equal(restored.d.querySelector(`[name="recipient"][value="${ids.nan}"]`).checked,true);
+    assert.deepEqual([...restored.d.querySelectorAll('#remedial-preview li strong')].map(el=>el.textContent),questions);
+    restored.click(confirm); await waitFor(() => restored.d.querySelector('.report-stats'), '已发补练成绩表');
+    assert.deepEqual([...restored.d.querySelectorAll('tbody tr .mono')].map(el=>el.textContent),['nan']);
+    const chosen = await page(), skipped = await page();
+    await login(chosen,'nan','Teacher123!'); await login(skipped,'lin','Teacher123!');
+    const cards = p => [...p.d.querySelectorAll('.student-card')].filter(el=>el.textContent.includes('第1题补练'));
+    assert.equal(cards(skipped).length,0); assert.equal(cards(chosen).length,1);
+    cards(chosen)[0].click(); await waitFor(()=>chosen.d.querySelector('#answer-4'), '学生收到五题同类补练');
+    assert.equal(chosen.d.querySelector('#answer-5'),null);
+  });
+});
+
 function seedCalendar(app) {
   const db = app.db;
   db.prepare("INSERT INTO classes(name) VALUES('二班')").run();

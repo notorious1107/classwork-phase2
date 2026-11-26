@@ -17,6 +17,11 @@ export function analyticsSelection(url) {
 const mean = students => students.length ? Math.round(students.reduce((sum, s) => sum + s.score, 0) / students.length * 10) / 10 : null;
 const answerStatus = (student, index, correctAnswer) => !student.submittedAt ? 'unsubmitted' : student.answers[index] == null || student.answers[index] === '' ? 'missing' : student.answers[index] === correctAnswer ? 'correct' : 'wrong';
 
+export function questionResponses(students, index, correctAnswer) {
+  return students.map(s => ({ id: s.id, username: s.username, name: s.name,
+    status: answerStatus(s, index, correctAnswer), answer: s.answers[index] ?? null, submittedAt: s.submittedAt, savedAt: s.savedAt }));
+}
+
 export function aggregatePractice(papers, selection) {
   const assignments = [], questions = [], allSubmitted = [];
   let total = 0, selectedQuestion = null;
@@ -35,8 +40,7 @@ export function aggregatePractice(papers, selection) {
         submittedCount: submitted.length, errorCount, errorRate: submitted.length ? Math.round(errorCount / submitted.length * 1000) / 10 : null };
       questions.push(stats);
       if (selection?.assignmentId === a.id && selection.questionNumber === index + 1) selectedQuestion = {
-        ...stats, correctAnswer, students: students.map(s => ({ id: s.id, username: s.username, name: s.name,
-          status: answerStatus(s, index, correctAnswer), answer: s.answers[index] ?? null, submittedAt: s.submittedAt, savedAt: s.savedAt }))
+        ...stats, correctAnswer, students: questionResponses(students, index, correctAnswer)
       };
     });
   }

@@ -193,11 +193,68 @@ function analyticsQuestionList() {
   if (!questions.length) return `<div class="empty"><h3>${data.summary.assignmentCount ? '当前范围暂无常错题' : '当前范围没有练习'}</h3><p>${data.summary.submitted ? '已交原答案中没有答错或漏答，可勾选包含全部题目查看。' : '暂无学生提交，可勾选包含全部题目查看未交人数。'}</p></div>`;
   return `<div class="analytics-questions">${questions.map(q => `<a class="analytics-question" href="${esc(analyticsHref({ filters: data.filters, selection: q }))}" data-analytics-question="${q.assignmentId}:${q.questionNumber}"><div class="section-heading"><span class="question-number">第 ${q.questionNumber} 题</span><span class="analytics-error">${q.errorCount ? `${q.errorCount} 人需讲评` : '暂无错漏'}</span></div><p class="analytics-expression">${esc(q.expression)} ＝ ?</p><p class="analytics-source">${esc(q.title)}<br>${date(q.createdAt)} 发布</p>${analyticsCounts(q)}<span class="analytics-open">查看逐人原答案 →</span></a>`).join('')}</div>`;
 }
+function remedialPreviewView(q) {
+  const p = q.remedialPreview;
+  if (!p) return '';
+  const recipients = q.students.filter(s => p.studentIds.includes(s.id)).map(s => `${s.name}（${s.username}）`);
+  return `<section class="remedial-preview"><h3>补练预览 · ${p.expressions.length} 题</h3>
+    <p>接收学生（${recipients.length} 人）：${esc(recipients.join('、'))}</p>
+    <ol class="preview-questions">${p.expressions.map((expr,i) => `<li><span>${i+1}.</span><strong>${esc(expr)} ＝ ?</strong></li>`).join('')}</ol>
+    <p id="remedial-stale" class="small" hidden>接收名单已变更，请重新生成预览。</p>
+    <button class="button" type="submit" value="publish">确认发布补练</button></section>`;
+}
+function remedialForm(q) {
+  const students = q.students.filter(s => s.status === 'wrong' || s.status === 'missing');
+  if (!students.length) return '';
+  return `<form id="remedial-form"><fieldset><legend>布置同类补练</legend>
+    <p>选择接收学生，预览 5 道同类题。</p><div class="remedial-students">${students.map(s =>
+      `<label><input type="checkbox" name="recipient" value="${s.id}" ${q.remedialPreview?.studentIds.includes(s.id) ? 'checked' : ''}>
+      <span>${esc(s.name)}（${esc(s.username)}） · ${s.status === 'missing' ? '漏答' : '答错'}</span></label>`).join('')}</div>
+    <button type="submit" class="button secondary" value="preview" ${q.remedialPreview ? '' : 'disabled'}>生成补练预览</button>
+    <div id="remedial-preview">${remedialPreviewView(q)}</div></fieldset><p id="remedial-error" class="form-error" role="alert"></p></form>`;
+}
+const selectedRecipients = form => [...form.querySelectorAll('[name="recipient"]:checked')].map(input => Number(input.value));
+function updateRemedialControls(form) {
+  const ids = selectedRecipients(form), preview = state.analyticsData.selectedQuestion.remedialPreview;
+  form.querySelector('[value="preview"]').disabled = !ids.length;
+  if (preview) {
+    const stale = ids.length !== preview.studentIds.length || ids.some(id => !preview.studentIds.includes(id));
+    form.querySelector('[value="publish"]').disabled = stale;
+    form.querySelector('#remedial-stale').hidden = !stale;
+  }
+}
+async function remedialAction(form, publish) {
+  if (state.busy) return;
+  const q = state.analyticsData.selectedQuestion, classId = state.classId, studentIds = selectedRecipients(form);
+  updateRemedialControls(form);
+  if (!studentIds.length || (publish && !form.querySelector('[value="publish"]:enabled'))) return;
+  state.busy = true; form.querySelector('fieldset').disabled = true; errorAt('remedial-error', '');
+  try {
+    if (publish) {
+      const result = await api(`/analytics/remedial-previews/${q.remedialPreview.previewId}/publish`, 'POST', {});
+      if (form.isConnected) { toast(`补练已发给 ${studentIds.length} 名学生`); location.hash = reportHref(result.id, classId); }
+    } else {
+      const preview = await api('/analytics/remedial-previews', 'POST', { classId, assignmentId: q.assignmentId, questionNumber: q.questionNumber, studentIds });
+      if (form.isConnected) {
+        q.remedialPreview = preview; form.querySelector('#remedial-preview').innerHTML = remedialPreviewView(q);
+        form.querySelector('#remedial-preview').scrollIntoView?.({ block: 'nearest' });
+      }
+    }
+  } catch (e) {
+    if (form.isConnected) {
+      if (publish && [400,409].includes(e.status)) { q.remedialPreview = null; form.querySelector('#remedial-preview').replaceChildren(); }
+      errorAt('remedial-error', e.message);
+    }
+  } finally {
+    state.busy = false;
+    if (form.isConnected) { form.querySelector('fieldset').disabled = false; updateRemedialControls(form); }
+  }
+}
 function analyticsDetail(data) {
   const q = data.selectedQuestion;
   if (!q) return '';
   const statuses = { correct: '答对', wrong: '答错', missing: '漏答', unsubmitted: '未交、未评分' };
-  return `<section id="analytics-detail" class="panel analytics-detail" aria-label="逐人原答案"><div class="section-heading"><h2>第 ${q.questionNumber} 题 · 逐人原答案</h2><button class="text-button" data-action="analytics-list">返回题目列表 ↓</button></div><p class="analytics-source">${esc(q.title)} · ${date(q.createdAt)} 发布（北京时间）</p><p class="analytics-expression">${esc(q.expression)} ＝ ${q.correctAnswer}</p>${analyticsCounts(q)}<p class="muted">已交显示首次交卷答案；未交只展示最后保存的草稿，不评对错。</p><div class="table-wrap"><table><thead><tr><th>学生 / 学号</th><th>状态</th><th>当时填写的答案</th><th>时间（北京时间）</th></tr></thead><tbody>${q.students.map(s => `<tr data-analytics-student="${s.id}"><td><a class="student-name" href="${esc(reviewHref(q.assignmentId, s.id, { analytics: '1', ...data.filters, questionNumber: String(q.questionNumber), all: state.analyticsAll ? '1' : '0' }))}">${esc(s.name)}</a><small class="analytics-account">${esc(s.username)}</small></td><td><span class="analytics-status ${s.status}">${statuses[s.status]}</span></td><td>${s.status === 'unsubmitted' ? s.savedAt ? `<span class="small muted">草稿：</span>${s.answer == null || s.answer === '' ? '未填' : esc(s.answer)}` : '未保存答案' : s.status === 'missing' ? '未填' : esc(s.answer)}</td><td>${date(s.submittedAt || s.savedAt)}${!s.submittedAt && s.savedAt ? '<small class="analytics-account">草稿保存</small>' : ''}</td></tr>`).join('')}</tbody></table></div></section>`;
+  return `<section id="analytics-detail" class="panel analytics-detail" aria-label="逐人原答案"><div class="section-heading"><h2>第 ${q.questionNumber} 题 · 逐人原答案</h2><button class="text-button" data-action="analytics-list">返回题目列表 ↓</button></div><p class="analytics-source">${esc(q.title)} · ${date(q.createdAt)} 发布（北京时间）</p><p class="analytics-expression">${esc(q.expression)} ＝ ${q.correctAnswer}</p>${analyticsCounts(q)}<p class="muted">已交显示首次交卷答案；未交只展示最后保存的草稿，不评对错。</p><div class="table-wrap"><table><thead><tr><th>学生 / 学号</th><th>状态</th><th>当时填写的答案</th><th>时间（北京时间）</th></tr></thead><tbody>${q.students.map(s => `<tr data-analytics-student="${s.id}"><td><a class="student-name" href="${esc(reviewHref(q.assignmentId, s.id, { analytics: '1', ...data.filters, questionNumber: String(q.questionNumber), all: state.analyticsAll ? '1' : '0' }))}">${esc(s.name)}</a><small class="analytics-account">${esc(s.username)}</small></td><td><span class="analytics-status ${s.status}">${statuses[s.status]}</span></td><td>${s.status === 'unsubmitted' ? s.savedAt ? `<span class="small muted">草稿：</span>${s.answer == null || s.answer === '' ? '未填' : esc(s.answer)}` : '未保存答案' : s.status === 'missing' ? '未填' : esc(s.answer)}</td><td>${date(s.submittedAt || s.savedAt)}${!s.submittedAt && s.savedAt ? '<small class="analytics-account">草稿保存</small>' : ''}</td></tr>`).join('')}</tbody></table></div>${remedialForm(q)}</section>`;
 }
 function analyticsView(data) {
   const s = data.summary, range = data.filters;
@@ -592,6 +649,7 @@ async function formAction(form, errorId, action) {
 root.addEventListener('submit', async event => {
   event.preventDefault();
   const form = event.target;
+  if (form.id === 'remedial-form') await remedialAction(form, event.submitter?.value === 'publish');
   if (form.id === 'password-form') await formAction(form, 'password-error', async data => {
     document.querySelector('#password-success').textContent = '';
     if (data.newPassword !== data.confirmPassword) throw new Error('两次输入的新密码不一致');
@@ -842,6 +900,7 @@ root.addEventListener('input', event => {
   }
 });
 root.addEventListener('change', async event => {
+  if (event.target.name === 'recipient') updateRemedialControls(event.target.form);
   if (event.target.closest('#publish-form')) { syncPracticeFields(); publishChanged(); }
   if (state.busy) return;
   if (event.target.name === 'analyticsAll' && state.analyticsData) {
