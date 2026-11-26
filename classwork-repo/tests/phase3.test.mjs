@@ -45,6 +45,8 @@ test('个人限时：独立起点、幂等开始、全班截止取较早者及�
     const path = `/assignments/${work.id}`, answers = work.questions.map(solution);
     const before = (await request(path, lin.cookie)).body;
     assert.equal(before.startedAt, null); assert.deepEqual(before.questions, []); assert.deepEqual(before.expressions, []);
+    const unstarted = (await request(path + '/report?classId=1', teacher)).body.students[0];
+    assert.equal(unstarted.startedAt, null); assert.equal(unstarted.effectiveDueAt, null); assert.equal(unstarted.isClosed, false);
     assert.equal((await request(path + '/draft', lin.cookie, 'PUT', { answers })).status, 400);
     assert.equal((await request(path + '/start', teacher, 'POST', {})).status, 403);
     const starts = await Promise.all([request(path + '/start', lin.cookie, 'POST', {}), request(path + '/start', lin.cookie, 'POST', {})]);
@@ -57,7 +59,19 @@ test('个人限时：独立起点、幂等开始、全班截止取较早者及�
     assert.equal((await request(path + '/draft', lin.cookie, 'PUT', { answers: partial })).status, 200);
     await restart();
     assert.deepEqual((await request(path, lin.cookie)).body.answers, partial);
+    time('2026-11-24T11:19:59.999Z');
+    assert.equal((await request(path + '/report', teacher)).body.students.find(s => s.id === lin.id).isClosed, false);
     time('2026-11-24T11:20:00Z');
+    const rows = (await request(path + '/report?classId=1', teacher)).body.students;
+    for (const [pupil, end, expired] of [[lin, '11:20', true], [zhou, '11:30', false]]) {
+      const row = rows.find(s => s.id === pupil.id);
+      const home = (await request('/assignments', pupil.cookie)).body.find(a => a.id === work.id);
+      for (const view of [row, home]) {
+        assert.equal(view.effectiveDueAt, `2026-11-24T${end}:00.000Z`);
+        assert.equal(view.deadlineSource, 'personal');
+        assert.equal(view.isClosed, expired);
+      }
+    }
     assert.equal((await request(path + '/submit', lin.cookie, 'POST', { answers, startedAt: '2099-01-01' })).status, 409);
     assert.equal((await request(path + '/draft', lin.cookie, 'PUT', { answers })).status, 200);
     assert.equal((await request(path, lin.cookie)).body.submittedAt, null);
@@ -70,6 +84,9 @@ test('个人限时：独立起点、幂等开始、全班截止取较早者及�
     const limitedPath = `/assignments/${limited.id}`;
     assert.equal((await request(limitedPath + '/start', zhou.cookie, 'POST', {})).body.effectiveDueAt, '2026-11-24T11:25:00.000Z');
     time('2026-11-24T11:25:00Z');
+    const limitedRows = (await request(limitedPath + '/report', teacher)).body.students;
+    assert.ok(limitedRows.every(s => s.deadlineSource === 'class' && s.isClosed));
+    assert.equal(limitedRows.find(s => s.id === lin.id).startedAt, null);
     assert.equal((await request(limitedPath + '/submit', zhou.cookie, 'POST', { answers: limited.questions.map(solution) })).status, 409);
     assert.equal((await request(limitedPath + '/start', lin.cookie, 'POST', {})).status, 409);
     assert.equal((await request(path + '/submit', zhou.cookie, 'POST', { answers })).body.score, 100);

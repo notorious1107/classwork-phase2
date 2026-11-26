@@ -12,11 +12,15 @@ function resetPublish() { state.preview = null; state.publishDraft = null; state
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 const date = value => value ? new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(new Date(value)) : '—';
 const assignmentNow = a => a.serverNow && a.receivedAt !== undefined ? Date.parse(a.serverNow) + Math.max(0, performance.now() - a.receivedAt) : Date.now();
-const closed = a => a.isClosed || ((a.effectiveDueAt || a.dueAt) && assignmentNow(a) >= Date.parse(a.effectiveDueAt || a.dueAt));
+const dueTime = a => a.effectiveDueAt || a.dueAt ? Date.parse(a.effectiveDueAt || a.dueAt) : Infinity;
+const closed = (a, now = assignmentNow(a)) => a.isClosed || now >= dueTime(a);
 const deadline = a => a.dueAt ? `截止：${date(a.dueAt)}（北京时间）` : '不限截止时间';
 const closedMessage = '已截止，不能提交。仍可保存草稿，老师处计为未交。';
+let nextOverviewExpiry = Infinity;
 function syncDeadlineUI() {
   const a = state.assignment;
+  const panel = document.querySelector('#student-home, #report-progress');
+  if (panel && assignmentNow(a ?? state.assignments[0] ?? {}) >= nextOverviewExpiry) updateOverviewPanel(panel);
   const timer = document.querySelector('#countdown');
   if (timer && a?.effectiveDueAt) {
     const seconds = Math.max(0, Math.ceil((Date.parse(a.effectiveDueAt) - assignmentNow(a)) / 1000));
@@ -58,8 +62,13 @@ async function api(path, method = 'GET', data) {
   }
   return result;
 }
-function badge(a) {
-  return a.submittedAt ? '<span class="badge done">已批改</span>' : closed(a) ? '<span class="badge overdue">已截止 · 未交</span>' : a.savedAt ? '<span class="badge draft">草稿</span>' : '<span class="badge">待完成</span>';
+function badge(a, now) {
+  if (a.submittedAt) return '<span class="badge done">已批改</span>';
+  if (closed(a, now)) {
+    const reason = a.deadlineSource === 'personal' ? '个人限时已到' : '已截止';
+    return `<span class="badge overdue">${reason} · 未交，不能提交</span>`;
+  }
+  return a.savedAt ? '<span class="badge draft">草稿</span>' : a.startedAt ? '<span class="badge">作答中</span>' : '<span class="badge">待完成</span>';
 }
 function header() {
   const inAnalytics = routePath() === '#/analytics' || (state.reviewData && routeParams().has('analytics'));
@@ -290,8 +299,14 @@ function fileBase64(file) {
 }
 function reportView(a) {
   return `<a class="back-link" href="${state.calendarBack ?? '#/'}">← ${state.calendarBack ? '返回练习月历' : '返回班级作业'}</a>${classPicker(a.classes)}${pageTitle('作业成绩', esc(a.title), `${assignmentSummary(a)} · 满分 100 分 · ${date(a.createdAt)} 发布 · ${deadline(a)}`, '<button class="button secondary" data-action="refresh">刷新成绩 ↻</button>')}
-    <div class="report-stats"><div><span>已交人数</span><strong>${a.submitted}<small> / ${a.total} 人</small></strong></div><div><span>未交人数</span><strong>${a.pending}<small> 人</small></strong></div><div><span>班级平均分</span><strong>${a.average ?? '—'}<small>${a.average === null ? ' 暂无提交' : ' 分'}</small></strong></div></div>
-    <section class="panel"><div class="section-heading"><h2>每位同学的进度</h2><span class="muted small">平均分仅计算已提交学生</span></div><div class="table-wrap"><table><thead><tr><th scope="col">学生</th><th scope="col">账号</th><th scope="col">作业状态</th><th scope="col">提交时间</th><th scope="col">成绩 / 100</th></tr></thead><tbody>${a.students.map(s => `<tr><td><a class="student-review-link" href="${esc(reviewHref(a.id, s.id, routeParams().has('calendar') ? { calendar: routeParams().get('calendar') } : {}))}"><span class="avatar">${esc(s.name.slice(0, 1))}</span>${esc(s.name)}<small>查看作答 →</small></a></td><td class="mono">${esc(s.username)}</td><td>${badge({ ...s, dueAt: a.dueAt, isClosed: a.isClosed })}</td><td>${date(s.submittedAt)}</td><td class="score-cell">${s.score ?? '—'}</td></tr>`).join('') || '<tr><td colspan="5">还没有学生，请前往学生名单创建账号。</td></tr>'}</tbody></table></div></section><details class="panel questions-details"><summary>查看本次题目（${a.questionCount} 题）</summary><div class="question-preview">${a.expressions.map((expression, i) => `<span>${i + 1}.　${esc(expression)} = ?</span>`).join('')}</div></details>`;
+    <div id="report-progress">${reportProgress(a)}</div><details class="panel questions-details"><summary>查看本次题目（${a.questionCount} 题）</summary><div class="question-preview">${a.expressions.map((expression, i) => `<span>${i + 1}.　${esc(expression)} = ?</span>`).join('')}</div></details>`;
+}
+function reportProgress(a) {
+  const now = assignmentNow(a);
+  nextOverviewExpiry = a.students.reduce((next, student) =>
+    student.submittedAt || closed(student, now) ? next : Math.min(next, dueTime(student)), Infinity);
+  return `<div class="report-stats"><div><span>已交人数</span><strong>${a.submitted}<small> / ${a.total} 人</small></strong></div><div><span>未交人数</span><strong>${a.pending}<small> 人</small></strong></div><div><span>班级平均分</span><strong>${a.average ?? '—'}<small>${a.average === null ? ' 暂无提交' : ' 分'}</small></strong></div></div>
+    <section class="panel"><div class="section-heading"><h2>每位同学的进度</h2><span class="muted small">平均分仅计算已提交学生</span></div><div class="table-wrap"><table><thead><tr><th scope="col">学生</th><th scope="col">账号</th><th scope="col">作业状态</th><th scope="col">提交时间</th><th scope="col">成绩 / 100</th></tr></thead><tbody>${a.students.map(s => `<tr><td><a class="student-review-link" href="${esc(reviewHref(a.id, s.id, routeParams().has('calendar') ? { calendar: routeParams().get('calendar') } : {}))}"><span class="avatar">${esc(s.name.slice(0, 1))}</span>${esc(s.name)}<small>查看作答 →</small></a></td><td class="mono">${esc(s.username)}</td><td>${badge(s, now)}</td><td>${date(s.submittedAt)}</td><td class="score-cell">${s.score ?? '—'}</td></tr>`).join('') || '<tr><td colspan="5">还没有学生，请前往学生名单创建账号。</td></tr>'}</tbody></table></div></section>`;
 }
 const mistakeHref = (a, original = false) => `#/mistakes/${a.assignmentId}/${a.questionNumber}${original ? '/original' : ''}`;
 function attemptsTable(attempts) {
@@ -321,12 +336,61 @@ async function saveCorrection() {
   } catch (e) { errorAt('correction-error', e.message); }
   finally { state.busy = false; form.querySelector('fieldset').disabled = false; }
 }
+function studentCard(a, now) {
+  const personal = a.deadlineSource === 'personal';
+  const cutoff = personal ? `个人截止：${date(a.effectiveDueAt)}（北京时间）` : deadline(a);
+  let action = a.savedAt || a.startedAt ? '继续作答' : '开始作答';
+  if (closed(a, now)) action = a.timeLimitMinutes && !a.startedAt ? '查看作业' : '查看草稿';
+  const progress = a.savedAt ? `已保存 ${a.answers.filter(v => v !== null).length}/${a.questionCount} 题` : a.timeLimitMinutes && !a.startedAt && !closed(a, now) ? '开始作答后计时' : '';
+  return `<a class="assignment-card student-card" href="#/assignment/${a.id}">
+    <div class="card-top">${badge(a, now)}<span class="muted small">${date(a.createdAt)}</span></div>
+    <h3>${esc(a.title)}</h3><p class="muted">${assignmentSummary(a)} · 满分 100 分<br>${cutoff}</p>
+    <div class="student-card-bottom">${a.submittedAt
+      ? `<strong class="result-score">${a.score}<small> 分</small></strong><span>查看批改 →</span>`
+      : `<span>${progress}</span><strong>${action} →</strong>`}</div></a>`;
+}
 function studentHome() {
-  const pending = state.assignments.filter(a => !a.submittedAt && !closed(a)).length;
-  const overdue = state.assignments.filter(a => !a.submittedAt && closed(a)).length;
-  const detail = [pending ? `还有 ${pending} 份练习可以提交。` : '', overdue ? `${overdue} 份已截止未交，仍可查看和保存草稿。` : ''].join(' ');
-  return `${pageTitle('我的作业本', `${esc(state.user.name)}，今天也加油！`, detail.trim() || (state.assignments.length ? '所有作业都完成了，可以打开看看批改结果。' : '老师发布作业后，就会出现在这里。'))}
-    <section class="student-grid">${state.assignments.map(a => `<a class="assignment-card student-card" href="#/assignment/${a.id}"><div class="card-top">${badge(a)}<span class="muted small">${date(a.createdAt)}</span></div><h2>${esc(a.title)}</h2><p class="muted">${assignmentSummary(a)} · 满分 100 分<br>${deadline(a)}</p><div class="student-card-bottom">${a.submittedAt ? `<strong class="result-score">${a.score}<small> 分</small></strong><span>查看批改 →</span>` : `<span>${a.savedAt ? `上次已保存 ${a.answers.filter(v => v !== null).length}/${a.questionCount} 题` : '认真想一想，再写下答案'}</span><strong>${closed(a) ? '查看草稿' : a.savedAt ? '继续作答' : '开始作答'} →</strong>`}</div></a>`).join('') || '<div class="empty panel"><span class="empty-symbol">＋ −</span><h2>作业本还是空的</h2><p>稍后再来看看吧。</p><button class="button secondary" data-action="refresh">刷新作业</button></div>'}</section>`;
+  const assignments = state.assignments, now = assignmentNow(assignments[0] ?? {});
+  const open = [], overdue = [], submitted = [];
+  for (const a of assignments) {
+    if (a.submittedAt) submitted.push(a);
+    else if (closed(a, now)) overdue.push(a);
+    else open.push(a);
+  }
+  open.sort((a, b) => dueTime(a) - dueTime(b) || Date.parse(b.createdAt) - Date.parse(a.createdAt) || b.id - a.id);
+  nextOverviewExpiry = open.length ? dueTime(open[0]) : Infinity;
+  const groups = [['可提交', open], ['已截止未交', overdue], ['已提交', submitted]];
+  const summary = assignments.length ? `${open.length} 份可提交 · ${overdue.length} 份已截止未交 · ${submitted.length} 份已提交` : '老师发布作业后，就会出现在这里。';
+  const title = pageTitle('我的作业本', `${esc(state.user.name)}，今天也加油！`, summary);
+  if (!assignments.length) return title + '<section class="student-grid"><div class="empty panel"><span class="empty-symbol">＋ −</span><h2>作业本还是空的</h2><p>稍后再来看看吧。</p><button class="button secondary" data-action="refresh">刷新作业</button></div></section>';
+  return title + groups.filter(([, papers]) => papers.length).map(([label, papers]) => `
+    <section class="work-group" aria-label="${label}"><h2>${label} <small>${papers.length} 份</small></h2>
+    <div class="student-grid">${papers.map(a => studentCard(a, now)).join('')}</div></section>`).join('');
+}
+function updateOverviewPanel(panel) {
+  const focusedLink = panel.contains(document.activeElement) && document.activeElement.closest('a')?.getAttribute('href');
+  panel.innerHTML = panel.id === 'report-progress' ? reportProgress(state.assignment) : studentHome();
+  if (focusedLink) [...panel.querySelectorAll('a')].find(link => link.getAttribute('href') === focusedLink)?.focus({ preventScroll: true });
+}
+async function refreshTimedOverview() {
+  const panel = document.querySelector('#student-home, #report-progress');
+  if (!panel || document.visibilityState === 'hidden' || panel.dataset.refreshing) return;
+  const report = state.assignment, rows = report ? report.students : state.assignments;
+  if (!rows.some(row => (report ?? row).timeLimitMinutes && !row.submittedAt && !row.isClosed)) return;
+  panel.dataset.refreshing = 'true';
+  try {
+    const latest = await api(report ? `/assignments/${report.id}/report?classId=${state.classId}` : '/assignments');
+    if (!panel.isConnected) return;
+    const next = report ? latest.students : latest;
+    const changed = rows.length !== next.length || next.some((row, i) =>
+      ['id', 'startedAt', 'submittedAt', 'savedAt', 'isClosed', 'name'].some(key => row[key] !== rows[i][key]));
+    if (report) state.assignment = latest;
+    else state.assignments = latest;
+    if (changed) updateOverviewPanel(panel);
+    else syncDeadlineUI();
+  } catch {
+    // Continue from the last known deadlines until the next successful refresh.
+  } finally { delete panel.dataset.refreshing; }
 }
 function workbook(a) {
   const done = !!a.submittedAt;
@@ -353,7 +417,7 @@ function render() {
   else if (routePath() === '#/students' && state.user.role === 'teacher') view = studentsView();
   else if (routePath() === '#/calendar' && state.user.role === 'teacher') view = calendarView(state.calendarData);
   else if (state.assignment) view = state.user.role === 'teacher' ? reportView(state.assignment) : workbook(state.assignment);
-  else view = state.user.role === 'teacher' ? teacherHome() : studentHome();
+  else view = state.user.role === 'teacher' ? teacherHome() : `<div id="student-home">${studentHome()}</div>`;
   root.innerHTML = `${header()}${state.user ? `<main class="main">${view}</main>` : view}<footer>小小算术 <span>·</span> 每天进步一点点</footer>`;
   syncDeadlineUI();
   restorePublishForm();
@@ -842,6 +906,11 @@ try { state.user = await api('/me'); } catch (e) { if (!e.message.includes('请�
 await load();
 
 setInterval(syncDeadlineUI, 1000);
+setInterval(refreshTimedOverview, 15000);
 window.addEventListener('focus', syncDeadlineUI);
+window.addEventListener('focus', refreshTimedOverview);
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) { syncDeadlineUI(); refreshTimedOverview(); }
+});
 window.addEventListener('online', () => scheduleAutosave());
 window.addEventListener('focus', () => scheduleAutosave());

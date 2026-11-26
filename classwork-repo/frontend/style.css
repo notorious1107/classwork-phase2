@@ -289,3 +289,8 @@ select{font:inherit;display:block;width:100%;border:1px solid #cbd6e8;border-rad
 #missing-questions button:hover{background:#eef3ff}
 .question:has(input:invalid) .draft-hint{display:block}
 .equation input:invalid{border-color:#b22f33}
+.work-group + .work-group{margin-top:36px}
+.work-group > h2{margin-bottom:14px}
+.work-group > h2 small{margin-left:6px;color:var(--muted);font-size:14px;font-weight:400}
+.student-card h3{margin:22px 0 10px;font-size:23px}
+.student-card .card-top{flex-wrap:wrap}

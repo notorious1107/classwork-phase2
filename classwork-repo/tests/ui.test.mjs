@@ -1208,6 +1208,78 @@ test('混合练习表单按年级选择知识点与提高难度', async () => {
   });
 });
 
+test('我的作业分组并按本人实际截止排序，已交优先于到期状态，打开首页时到点自动移组', async () => {
+  const start = Date.parse('2026-11-24T11:00:00Z');
+  let now = start;
+  const stamp = minutes => new Date(start + minutes * 60_000).toISOString();
+  await withPages(async ({ app, page, login }) => {
+    const db = app.db;
+    const student = Number(db.prepare("INSERT INTO users(username,name,password_hash,role) SELECT 'sorter','小雨',password_hash,'student' FROM users WHERE role='teacher'").run().lastInsertRowid);
+    const paper = (title, options = {}) => publishAssignment(db, title, options);
+    const personal = paper('本人时间最少', { timeLimitMinutes: 10, dueAt: stamp(60) });
+    const classFirst = paper('以全班截止为准', { timeLimitMinutes: 60, dueAt: stamp(2) });
+    const regular = paper('全班三分钟后交', { dueAt: stamp(3) });
+    const notStarted = paper('未开始也有全班截止', { timeLimitMinutes: 1, dueAt: stamp(4) });
+    const untimed = paper('没有期限');
+    const waiting = paper('开始后才限时', { timeLimitMinutes: 1 });
+    const expired = paper('之前已到期', { dueAt: stamp(-5) });
+    const done = paper('已交零分', { timeLimitMinutes: 1 });
+    const begin = db.prepare('INSERT INTO assignment_starts(assignment_id,student_id,started_at) VALUES(?,?,?)');
+    begin.run(personal, student, stamp(-9)); begin.run(classFirst, student, stamp(0)); begin.run(done, student, stamp(-15));
+    db.prepare('INSERT INTO submissions(assignment_id,student_id,answers,saved_at,submitted_at,score) VALUES(?,?,?,?,?,?)')
+      .run(done, student, JSON.stringify(Array(10).fill(null)), stamp(-15), stamp(-15), 0);
+    const pupil = await page({ cookie: '', now: () => start + 86400000, monotonic: () => now - start });
+    await login(pupil, 'sorter', 'Teacher123!');
+    const ids = label => [...pupil.d.querySelectorAll(`.work-group[aria-label="${label}"] .student-card`)].map(card => Number(card.hash.split('/').pop()));
+    assert.deepEqual(ids('可提交'), [personal, classFirst, regular, notStarted, waiting, untimed]);
+    assert.deepEqual(ids('已截止未交'), [expired]);
+    assert.deepEqual(ids('已提交'), [done]);
+    const card = id => pupil.d.querySelector(`.student-card[href="#/assignment/${id}"]`);
+    assert.match(card(personal).textContent, /个人截止.*19:01/);
+    assert.match(card(waiting).textContent, /开始作答后计时/);
+    assert.equal(card(done).querySelector('.result-score').textContent.trim(), '0 分');
+    now += 60000;
+    await waitFor(() => ids('已截止未交').includes(personal), '个人到时自动移出可交组');
+    assert.match(card(personal).textContent, /个人限时已到.*不能提交/);
+    assert.deepEqual(ids('可提交'), [classFirst, regular, notStarted, waiting, untimed]);
+    assert.deepEqual(ids('已提交'), [done]);
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM assignment_starts').get().n, 3);
+    now += 60000;
+    await waitFor(() => ids('已截止未交').includes(classFirst), '全班截止早于个人限时');
+    assert.doesNotMatch(card(classFirst).textContent, /个人限时已到/);
+  }, undefined, { clock: () => now });
+});
+
+test('教师打开限时成绩表后能获知新开始的计时，每名学生到点单独标明不能提交', async () => {
+  let now = Date.parse('2026-11-24T11:00:00Z');
+  await withPages(async ({ app, page, login }) => {
+    const { ids } = seedAnalytics(app.db);
+    const id = publishAssignment(app.db, '各自计时', { timeLimitMinutes: 2, classIds: [1, 2] });
+    const teacher = await page({ cookie: '', now: () => now - 86400000, monotonic: () => now });
+    await login(teacher, 'teacher', 'Teacher123!');
+    teacher.click(`a[href="#/assignment/${id}"]`);
+    await waitFor(() => teacher.d.querySelector('#report-progress'), '打开限时成绩表');
+    const row = username => [...teacher.d.querySelectorAll('#report-progress tbody tr')].find(tr => tr.children[1].textContent === username);
+    assert.equal(row('lin').querySelector('.badge').textContent, '待完成');
+    const begin = app.db.prepare('INSERT INTO assignment_starts(assignment_id,student_id,started_at) VALUES(?,?,?)');
+    begin.run(id, ids.lin, new Date(now).toISOString());
+    now += 60000;
+    begin.run(id, ids.nan, new Date(now).toISOString());
+    teacher.w.dispatchEvent(new teacher.w.Event('focus'));
+    await waitFor(() => row('lin').querySelector('.badge').textContent === '作答中', '已打开的成绩表同步个人起点');
+    now += 60000;
+    await waitFor(() => row('lin').querySelector('.badge.overdue'), '到点自动更新个人状态');
+    assert.match(row('lin').textContent, /个人限时已到.*未交.*不能提交/);
+    assert.equal(row('nan').querySelector('.badge').textContent, '作答中');
+    assert.equal(row('blank').querySelector('.badge').textContent, '待完成');
+    assert.equal(row('zhou'), undefined);
+    assert.equal(row('lin').querySelector('.score-cell').textContent, '—');
+    assert.deepEqual([...teacher.d.querySelectorAll('.report-stats strong')].map(n => n.firstChild.textContent), ['0', '4', '—']);
+    teacher.click('[data-action="refresh"]');
+    await waitFor(() => row('lin')?.querySelector('.overdue'), '刷新仍显示个人限时已到');
+  }, undefined, { clock: () => now });
+});
+
 test('个人限时页面：开始后倒计时、刷新续计、到时保留答案与保存草稿', async () => {
   let current = Date.parse('2026-11-24T11:00:00Z');
   await withPages(async ({ app, page, login }) => {

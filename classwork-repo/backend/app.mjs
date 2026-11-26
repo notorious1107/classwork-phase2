@@ -80,6 +80,18 @@ function readAssignment(row) {
   };
 }
 
+function submissionWindow(assignment, startedAt, now) {
+  const classEnd = assignment.dueAt ? Date.parse(assignment.dueAt) : Infinity;
+  const personalEnd = assignment.timeLimitMinutes && startedAt
+    ? Date.parse(startedAt) + assignment.timeLimitMinutes * 60_000 : Infinity;
+  const end = Math.min(classEnd, personalEnd);
+  return {
+    startedAt, effectiveDueAt: Number.isFinite(end) ? new Date(end).toISOString() : null,
+    deadlineSource: personalEnd < classEnd ? 'personal' : assignment.dueAt ? 'class' : null,
+    isClosed: now >= end
+  };
+}
+
 export async function createApp({ dbPath = 'data/classwork.sqlite', teacherPassword, logger = console, clock = Date.now } = {}) {
   const db = await openStore(dbPath, teacherPassword);
   const attempts = new Map();
@@ -117,17 +129,13 @@ export async function createApp({ dbPath = 'data/classwork.sqlite', teacherPassw
     if (!row) fail(404, '作业不存在');
     return withClasses(row);
   }
-  function studentView(a, studentId) {
+  function studentView(a, studentId, now = clock()) {
     const s = db.prepare('SELECT * FROM submissions WHERE assignment_id=? AND student_id=?').get(a.id, studentId);
     const start = db.prepare('SELECT started_at FROM assignment_starts WHERE assignment_id=? AND student_id=?').get(a.id, studentId);
-    const personalDue = a.timeLimitMinutes && start ? Date.parse(start.started_at) + a.timeLimitMinutes * 60_000 : null;
-    const deadlines = [a.dueAt && Date.parse(a.dueAt), personalDue].filter(v => v !== null && v !== false);
-    const effectiveDueAt = deadlines.length ? new Date(Math.min(...deadlines)).toISOString() : null;
-    const result = { ...a, startedAt: start?.started_at ?? null, effectiveDueAt,
-      isClosed: effectiveDueAt !== null && clock() >= Date.parse(effectiveDueAt),
+    const result = { ...a, ...submissionWindow(a, start?.started_at ?? null, now),
       answers: s ? JSON.parse(s.answers) : Array(a.questionCount).fill(null), savedAt: s?.saved_at ?? null,
       submittedAt: s?.submitted_at ?? null, score: s?.score ?? null, draftRevision: s?.draft_revision ?? 0 };
-    if (a.timeLimitMinutes) result.serverNow = new Date(clock()).toISOString();
+    if (a.timeLimitMinutes) result.serverNow = new Date(now).toISOString();
     if (a.timeLimitMinutes && !start && !s?.submitted_at) {
       result.questions = []; result.expressions = []; result.answers = [];
     }
@@ -138,9 +146,11 @@ export async function createApp({ dbPath = 'data/classwork.sqlite', teacherPassw
     return result;
   }
   function report(a, classId = null) {
-    const students = assignmentStudents(db, a, classId);
+    const now = clock();
+    const students = assignmentStudents(db, a, classId).map(s => ({ ...s, ...submissionWindow(a, s.startedAt, now) }));
     const submitted = students.filter(s => s.submittedAt);
     return { ...a, reportClassId: classId, isClosed: isClosed(a),
+      ...(a.timeLimitMinutes || a.dueAt ? { serverNow: new Date(now).toISOString() } : {}),
       students, total: students.length, submitted: submitted.length,
       pending: students.length - submitted.length,
       average: submitted.length ? Math.round(submitted.reduce((sum, s) => sum + s.score, 0) / submitted.length * 10) / 10 : null };
@@ -396,7 +406,9 @@ export async function createApp({ dbPath = 'data/classwork.sqlite', teacherPassw
           let list = db.prepare('SELECT * FROM assignments ORDER BY id DESC').all().map(withClasses);
           const selected = user.role === 'teacher' ? classFilter(url) : null;
           list = list.filter(a => user.role === 'teacher' ? selected === null || a.classIds.includes(selected) : canAccess(a, user));
-          return send(200, list.map(a => user.role === 'teacher' ? report(a, selected) : studentView(a, user.id)));
+          if (user.role === 'teacher') return send(200, list.map(a => report(a, selected)));
+          const now = clock(), serverNow = new Date(now).toISOString();
+          return send(200, list.map(a => ({ ...studentView(a, user.id, now), serverNow })));
         }
         if (req.method === 'POST') {
           requireRole(user, 'teacher');
