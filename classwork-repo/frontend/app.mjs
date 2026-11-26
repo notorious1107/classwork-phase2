@@ -530,10 +530,14 @@ root.addEventListener('submit', async event => {
   if (form.id === 'answer-form' && !state.busy) {
     if (closed(state.assignment)) { syncDeadlineUI(); errorAt('answer-error', closedMessage); }
     else if (form.reportValidity()) {
-      const missing = readAnswers(form).filter(a => a === null).length, message = document.querySelector('#submit-missing');
-      message.hidden = !missing;
-      message.textContent = missing ? `还有 ${missing} 题没答。可以返回补答，也能确认按现有答案交卷；空题记为漏答，按整张卷的题数计分。` : '';
-      document.querySelector('#confirm-submit').textContent = missing ? '确认按现有答案交卷' : '确认提交';
+      const missing = readAnswers(form).flatMap((answer, index) => answer === null ? [index + 1] : []);
+      document.querySelector('#submit-missing').hidden = missing.length === 0;
+      document.querySelector('#missing-summary').textContent = missing.length
+        ? `还有 ${missing.length} 题没答。点题号可返回补答。按现有答案交卷时，空题计 0 分。` : '';
+      document.querySelector('#missing-questions').innerHTML = missing.map(number =>
+        `<button type="button" data-answer-id="answer-${number - 1}">第 ${number} 题</button>`
+      ).join('');
+      document.querySelector('#confirm-submit').textContent = missing.length ? '确认按现有答案交卷' : '确认提交';
       dialog.showModal();
     }
   }
@@ -810,6 +814,14 @@ root.addEventListener('click', async event => {
   }
 });
 document.querySelector('#cancel-submit').addEventListener('click', () => dialog.close());
+document.querySelector('#missing-questions').addEventListener('click', event => {
+  const button = event.target.closest('button[data-answer-id]');
+  if (!button) return;
+  const input = document.getElementById(button.dataset.answerId);
+  dialog.close();
+  input?.focus({ preventScroll: true });
+  input?.closest('.question').scrollIntoView?.({ block: 'center' });
+});
 document.querySelector('#confirm-submit').addEventListener('click', async () => { dialog.close(); await submitAnswers(); });
 let reverting = false;
 window.addEventListener('hashchange', async () => {

@@ -995,6 +995,49 @@ test('两个窗口的自动草稿冲突暂停保存，保留本页答案或载�
   });
 });
 
+test('50 题交卷确认按顺序列出漏题，点击题号可直接补答，填 0 后更新清单', async () => {
+  await withPages(async ({ app, page, login }) => {
+    seedAnalytics(app.db);
+    const id = publishAssignment(app.db, '查找漏题', { questionCount: 50 });
+    const pupil = await page();
+    await login(pupil, 'lin', 'Teacher123!');
+    pupil.click(`a[href="#/assignment/${id}"]`);
+    await waitFor(() => pupil.d.querySelector('#answer-49'), '打开 50 题作业');
+    const buttons = () => [...pupil.d.querySelectorAll('#missing-questions button')];
+    const labels = () => buttons().map(button => button.textContent);
+    const dialog = pupil.d.querySelector('#submit-dialog');
+
+    pupil.click('[data-submit]');
+    assert.deepEqual(labels(), Array.from({ length: 50 }, (_, i) => `第 ${i + 1} 题`));
+    buttons()[49].click();
+    assert.equal(dialog.open, false);
+    assert.equal(pupil.d.activeElement.id, 'answer-49');
+    for (let n = 1; n <= 50; n++) {
+      if (n !== 2 && n !== 31) pupil.fill(`answer-${n - 1}`, 0);
+    }
+    pupil.click('[data-submit]');
+    assert.match(pupil.d.querySelector('#missing-summary').textContent, /还有 2 题没答/);
+    assert.deepEqual(labels(), ['第 2 题', '第 31 题']);
+    buttons()[1].click();
+    assert.equal(pupil.d.activeElement.id, 'answer-30');
+    pupil.fill('answer-30', 3);
+    pupil.click('[data-submit]');
+    assert.deepEqual(labels(), ['第 2 题']);
+    buttons()[0].click();
+    assert.equal(pupil.d.activeElement.id, 'answer-1');
+    pupil.fill('answer-1', 0);
+    pupil.click('[data-submit]');
+    assert.equal(dialog.open, true);
+    assert.equal(pupil.d.querySelector('#submit-missing').hidden, true);
+    assert.deepEqual(labels(), []);
+    assert.equal(pupil.d.querySelector('#confirm-submit').textContent, '确认提交');
+    pupil.click('#cancel-submit');
+    assert.equal(pupil.d.querySelector('#answer-30').value, '3');
+    assert.equal(pupil.d.querySelector('#answer-49').value, '0');
+    assert.equal(app.db.prepare('SELECT COUNT(*) AS n FROM submissions WHERE assignment_id=? AND submitted_at IS NOT NULL').get(id).n, 0);
+  });
+});
+
 test('漏题确认可返回补答，自动保存期间交卷顺序正确，80分原卷与错题本明确标注漏答',async()=>{
   await withPages(async({app,page,login})=>{
     const ids=seedAnalytics(app.db),id=publishAssignment(app.db,'先交会做的题'),questions=JSON.parse(app.db.prepare('SELECT questions FROM assignments WHERE id=?').get(id).questions),pupil=await page();await login(pupil,'lin','Teacher123!');

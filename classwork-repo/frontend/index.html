@@ -16,7 +16,10 @@
       <span class="eyebrow">检查完成了吗？</span>
       <h2 id="dialog-title">交上这份作业</h2>
       <p>提交后会立即批改，答案不能再修改。你可以先返回检查。</p>
-      <p id="submit-missing" class="submit-missing" role="status" hidden></p>
+      <div id="submit-missing" class="submit-missing" hidden>
+        <p id="missing-summary" role="status"></p>
+        <div id="missing-questions" role="group" aria-labelledby="missing-summary"></div>
+      </div>
       <div class="actions"><button id="cancel-submit" class="button secondary">返回检查</button><button id="confirm-submit" class="button">确认提交</button></div>
     </div>
   </dialog>
