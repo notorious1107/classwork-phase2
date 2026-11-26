@@ -206,6 +206,8 @@ export async function createApp({ dbPath = 'data/classwork.sqlite', teacherPassw
       const user = rawToken && db.prepare(`SELECT u.* FROM users u JOIN sessions s ON s.user_id=u.id
         WHERE s.token_hash=? AND s.expires>?`).get(digest(rawToken), Date.now());
       if (!user) fail(401, '请先登录');
+      const expectedUser = req.headers['x-classwork-user'];
+      if (expectedUser !== undefined && expectedUser !== String(user.id)) fail(401, '浏览器已切换账号，请重新登录');
       const recheckSession = () => {
         if (!db.prepare('SELECT 1 FROM sessions WHERE token_hash=? AND user_id=? AND expires>?').get(digest(rawToken), user.id, Date.now())) fail(401, '登录已失效，请重新登录');
       };
@@ -442,7 +444,10 @@ export async function createApp({ dbPath = 'data/classwork.sqlite', teacherPassw
           if (a.timeLimitMinutes && !latest.startedAt) fail(400, '请先点击开始作答');
           const answers = validateAnswers(input.answers, action === 'submit', a.answerMax, a.questionCount, a.answerMaxes, input.allowIncomplete === true);
           if (input.draftRevision !== undefined && (!Number.isSafeInteger(input.draftRevision) || input.draftRevision < 0)) fail(400, '草稿版本无效，请重新打开作业');
-          const conflict = () => send(409, { error: '草稿已在其他窗口更新。已保留本页答案，请选择载入已保存草稿，或确认保留本页答案后再保存。', code: 'DRAFT_CONFLICT', draftRevision: studentView(a, user.id).draftRevision });
+          const conflict = () => {
+            const current = studentView(a, user.id);
+            return send(409, { error: '草稿已在其他窗口更新。已保留本页答案，请选择载入已保存草稿，或确认保留本页答案后再保存。', code: 'DRAFT_CONFLICT', draftRevision: current.draftRevision, answers: current.answers });
+          };
           let revision = input.draftRevision ?? null;
           if (revision !== null && revision !== latest.draftRevision) {
             // A lost save response can safely be retried when the stored answers are identical.

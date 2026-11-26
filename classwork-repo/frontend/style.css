@@ -282,3 +282,6 @@ select{font:inherit;display:block;width:100%;border:1px solid #cbd6e8;border-rad
   .preview-questions li{font-size:21px;padding:14px;grid-template-columns:24px minmax(0,1fr)}
   .preview-actions>*{flex:1;padding:12px;font-size:12px}
 }
+.draft-hint{display:none;margin-top:10px;color:#b22f33;font-size:12px}
+.question:has(input:invalid) .draft-hint{display:block}
+.equation input:invalid{border-color:#b22f33}
