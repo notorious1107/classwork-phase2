@@ -414,6 +414,78 @@ test('学生错题本跨作业归集，独立订正先隐答案、逐步反馈�
   }, undefined, { clock: () => Date.parse('2026-11-24T08:00:00Z') });
 });
 
+test('学生订正 18 − 5 后直接换一道不退位减法，新题独立作答，领取与交答案都可重试', async () => {
+  await withPages(async ({ app, page, login }) => {
+    seedCorrections(app.db);
+    const id = publishAssignment(app.db, '减法再练'), original = { a: 18, op: '-', b: 5 };
+    const questions = JSON.parse(app.db.prepare('SELECT questions FROM assignments WHERE id=?').get(id).questions);
+    questions[0] = original;
+    app.db.prepare('UPDATE assignments SET questions=? WHERE id=?').run(JSON.stringify(questions), id);
+    const pupil = await page(); await login(pupil, 'learner', 'Teacher123!');
+    const answers = questions.map(solution); answers[0] = 0;
+    const submission = await pupil.w.fetch(`/api/assignments/${id}/submit`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ answers })
+    });
+    assert.equal((await submission.json()).score, 90);
+    const card = `[data-mistake="${id}:1"]`;
+    pupil.click('nav a[href="#/mistakes"]');
+    await waitFor(() => pupil.d.querySelector(card), '错题出现在错题本');
+    assert.equal(pupil.d.querySelector(card + ' [data-action="start-practice"]'), null);
+    pupil.click(card + ' a.button');
+    await waitFor(() => pupil.d.querySelector('#correction-form'), '打开原题');
+    pupil.fill('correctionAnswer', 1); pupil.submit('correction-form');
+    await waitFor(() => pupil.d.querySelector('.correction-result.wrong'), '原题尚未改对');
+    assert.equal(pupil.d.querySelector('[data-action="start-practice"]'), null);
+    pupil.click('[data-action="retry-correction"]');
+    assert.match(pupil.d.querySelector('.correction-expression').textContent, /18 − 5/);
+    pupil.fill('correctionAnswer', 13); pupil.submit('correction-form');
+    await waitFor(() => pupil.d.querySelector('.correction-result.right'), '原题订正成功');
+    const fetch = pupil.w.fetch;
+    let dropStart = true, dropAnswer = true;
+    pupil.w.fetch = async (path, options) => {
+      const response = await fetch(path, options);
+      if (options.method === 'POST') {
+        if (dropStart && path.endsWith('/practice')) { dropStart = false; throw new Error('领取回包丢失'); }
+        if (dropAnswer && /\/practice\/\d+$/.test(path)) { dropAnswer = false; throw new Error('提交回包丢失'); }
+      }
+      return response;
+    };
+    pupil.click('[data-action="start-practice"]');
+    await waitFor(() => !dropStart && !pupil.d.querySelector('[data-action="start-practice"]').disabled, '领取后可重试');
+    pupil.click('[data-action="start-practice"]');
+    await waitFor(() => pupil.d.querySelector('h1')?.textContent === '同类再练', '换到同类题');
+    assert.equal(app.db.prepare('SELECT COUNT(*) AS n FROM mistake_practice').get().n, 1);
+    const expression = pupil.d.querySelector('.correction-expression').textContent;
+    const [, left, right] = expression.match(/^(\d+) − (\d+) ＝ \?$/);
+    assert.notEqual(Number(left), 18); assert.notEqual(Number(right), 5);
+    assert.ok(Number(left) % 10 >= Number(right) % 10);
+    assert.equal(pupil.d.querySelector('[name="correctionAnswer"]').value, '');
+    assert.equal(pupil.d.querySelector('.correction-result,.correction-explanation,.attempts-table'), null);
+    const refreshed = await page(pupil.session, pupil.w.location.hash);
+    assert.equal(refreshed.d.querySelector('.correction-expression').textContent, expression); refreshed.w.close();
+    pupil.fill('correctionAnswer', 13); pupil.submit('correction-form');
+    await waitFor(() => !dropAnswer && pupil.d.querySelector('#correction-error').textContent.includes('连接失败'), '新题答卷重试');
+    assert.equal(pupil.d.querySelector('[name="correctionAnswer"]').value, '13');
+    pupil.submit('correction-form');
+    await waitFor(() => pupil.d.querySelector('.correction-result.wrong'), '用原答案答新题判错');
+    assert.match(pupil.d.querySelector('.correction-explanation li small').textContent, new RegExp(`＝ ${left - right}$`));
+    pupil.click('[data-action="start-practice"]');
+    await waitFor(() => pupil.d.querySelector('#correction-form'), '再换一道');
+    const next = pupil.d.querySelector('.correction-expression').textContent;
+    assert.notEqual(next, expression);
+    const [, a, b] = next.match(/^(\d+) − (\d+)/);
+    pupil.fill('correctionAnswer', a - b); pupil.submit('correction-form');
+    await waitFor(() => pupil.d.querySelector('.correction-result.right'), '按第二道新题的答案判对');
+    pupil.click('.back-link');
+    await waitFor(() => pupil.d.querySelector(card + ' [data-action="start-practice"]'), '回错题本可直接同类再练');
+    assert.match(pupil.d.querySelector(card + ' .mistake-progress').textContent, /已订正 2 次 · 第 2 次首次做对/);
+    pupil.click(card + ' .mistake-origin');
+    await waitFor(() => pupil.d.querySelector('.score-stamp'), '回看原卷');
+    assert.equal(pupil.d.querySelector('.score-stamp strong').textContent, '90');
+    assert.equal(pupil.d.querySelector('#answer-0').value, '0');
+  });
+});
+
 test('订正断网保留输入、响应丢失重试不重复计次，刷新隐答案且账号之间不串题', async () => {
   await withPages(async ({ app, page, login }) => {
     const ids = seedCorrections(app.db), pupil = await page(); await login(pupil, 'learner', 'Teacher123!');

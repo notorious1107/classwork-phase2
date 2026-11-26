@@ -316,23 +316,69 @@ function mistakesView() {
   const items = state.mistakes;
   return `${pageTitle('每天进步一点点', '我的错题本', '收录第一次交卷时做错的题；订正后仍保留原作答和原分数。', '<button class="button secondary" data-action="refresh">刷新错题 ↻</button>')}<div class="mistake-overview"><span class="badge">共 ${items.length} 道错题</span><span class="badge done">最近订正正确 ${items.filter(i => i.lastAttemptCorrect).length} 道</span><span class="small muted">按原交卷时间，最近在前</span></div><section class="mistake-grid">${items.map(a => {
     const key = `${a.assignmentId}:${a.questionNumber}`, history = state.mistakeHistories[key];
-    return `<article class="panel mistake-card" data-mistake="${key}"><div class="section-heading"><span class="eyebrow">第 ${a.questionNumber} 题</span><span class="badge ${a.lastAttemptCorrect ? 'done' : 'draft'}">${a.lastAttemptCorrect ? '最近订正正确' : a.attemptCount ? '继续订正' : '还未订正'}</span></div><p class="mistake-expression">${esc(a.expression)} ＝ ?</p><a class="mistake-origin" href="${mistakeHref(a, true)}">${esc(a.title)} · 第 ${a.questionNumber} 题 ↗</a><p class="small muted">${date(a.submittedAt)} 首次交卷 · 当时的答案：${a.originalStatus === 'missing' ? '漏答（未填）' : esc(a.originalAnswer)}</p><p class="mistake-progress">已订正 ${a.attemptCount} 次${a.firstCorrectAttempt ? ` · 第 ${a.firstCorrectAttempt} 次首次做对` : ''}</p><div class="actions"><a class="button" href="${mistakeHref(a)}">订正 →</a>${a.attemptCount ? `<button class="text-button" data-action="correction-history" data-assignment="${a.assignmentId}" data-number="${a.questionNumber}">${history ? '收起订正记录' : '查看订正记录'}</button>` : ''}</div>${history ? `<section class="mistake-history" aria-label="第 ${a.questionNumber} 题订正记录">${attemptsTable(history)}</section>` : ''}</article>`;
+    return `<article class="panel mistake-card" data-mistake="${key}"><div class="section-heading"><span class="eyebrow">第 ${a.questionNumber} 题</span><span class="badge ${a.lastAttemptCorrect ? 'done' : 'draft'}">${a.lastAttemptCorrect ? '最近订正正确' : a.attemptCount ? '继续订正' : '还未订正'}</span></div><p class="mistake-expression">${esc(a.expression)} ＝ ?</p><a class="mistake-origin" href="${mistakeHref(a, true)}">${esc(a.title)} · 第 ${a.questionNumber} 题 ↗</a><p class="small muted">${date(a.submittedAt)} 首次交卷 · 当时的答案：${a.originalStatus === 'missing' ? '漏答（未填）' : esc(a.originalAnswer)}</p><p class="mistake-progress">已订正 ${a.attemptCount} 次${a.firstCorrectAttempt ? ` · 第 ${a.firstCorrectAttempt} 次首次做对` : ''}</p><div class="actions"><a class="button" href="${mistakeHref(a)}">订正 →</a>${a.firstCorrectAttempt && a.practiceKind ? practiceButton(a, '同类再练') : ''}${a.attemptCount ? `<button class="text-button" data-action="correction-history" data-assignment="${a.assignmentId}" data-number="${a.questionNumber}">${history ? '收起订正记录' : '查看订正记录'}</button>` : ''}</div>${history ? `<section class="mistake-history" aria-label="第 ${a.questionNumber} 题订正记录">${attemptsTable(history)}</section>` : ''}</article>`;
   }).join('') || '<div class="empty panel"><h2>暂时没有错题</h2><p>交卷后，第一次答错的题会收在这里。草稿和未交作业不收录。</p><a class="button secondary" href="#/">返回我的作业</a></div>'}</section>`;
+}
+const requestKey = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), v => v.toString(16).padStart(2, '0')).join('');
+function practiceButton(a, label) {
+  return `<button type="button" class="button" data-action="start-practice" data-assignment="${a.assignmentId}" data-number="${a.questionNumber}">${label}</button>`;
+}
+async function openPractice(button) {
+  const path = `/mistakes/${button.dataset.assignment}/${button.dataset.number}/practice`;
+  button.dataset.requestId ||= requestKey();
+  state.busy = true;
+  button.disabled = true;
+  try {
+    const data = await api(path, 'POST', { requestId: button.dataset.requestId });
+    location.hash = `#${path}/${data.practiceId}`;
+  } catch (e) { toast(e.message, true); }
+  finally { state.busy = false; button.disabled = false; }
 }
 function correctionView() {
   const c = state.correction, a = c.question, result = c.feedback;
-  return `<a class="back-link" href="#/mistakes">← 返回我的错题本</a>${pageTitle('合上答案，再算一次', '独立订正', `${esc(a.title)} · 第 ${a.questionNumber} 题 · 已订正 ${result?.attemptCount ?? a.attemptCount} 次`)}<section class="panel correction-paper"><span class="eyebrow">第 ${a.questionNumber} 题</span><p class="correction-expression">${esc(a.expression)} ＝ ?</p>${result ? `<div class="correction-result ${result.attempt.correct ? 'right' : 'wrong'}" role="status"><strong>第 ${result.attempt.attemptNumber} 次订正：${result.attempt.correct ? '✓ 答对了' : '再想一想'}</strong><p>我的答案：<b>${result.attempt.answer}</b>　正确答案：<b>${result.correctAnswer}</b></p></div><section class="correction-explanation"><h2>一步一步算</h2><ol>${result.steps.map(s => `<li><strong>${esc(s.reason)}</strong><p class="step-expression">${esc(s.before)}<br>＝ ${esc(s.after)}</p><small>${esc(s.calculation)}</small></li>`).join('')}</ol></section><div class="actions correction-actions"><button class="button" data-action="retry-correction">${result.attempt.correct ? '合上讲解，再练一次' : '再订正一次'}</button><a class="button secondary" href="#/mistakes">返回错题本</a></div><section class="correction-attempts"><h2>我的订正记录</h2>${attemptsTable(result.attempts)}</section>` : `<p class="muted small">先独立计算，提交后再看对错和讲解。</p><form id="correction-form"><fieldset><legend class="sr-only">独立填写订正答案</legend><label>订正答案<input name="correctionAnswer" type="number" min="0" max="${a.answerMax}" step="1" inputmode="numeric" autocomplete="off" required value="${esc(c.answer)}" placeholder="填入你的答案"></label><button class="button" type="submit">提交订正</button></fieldset><p id="correction-error" class="form-error" role="alert"></p></form>`}<div class="correction-original"><a class="text-button" href="${mistakeHref(a, true)}">查看当时交的原卷 →</a><p class="muted small">每次订正单独记录，原作业的答案和分数照旧。</p></div></section>`;
+  const practice = !!a.practiceId, heading = practice ? '同类再练' : '独立订正';
+  const source = `${esc(a.title)} · 第 ${a.questionNumber} 题`;
+  const detail = practice ? `来自${source}` : `${source} · 已订正 ${result?.attemptCount ?? a.attemptCount} 次`;
+  const answerLabel = practice ? '练习答案' : '订正答案';
+  let body;
+  if (result) {
+    const right = result.attempt.correct;
+    const verdict = right ? '✓ 答对了' : '再想一想';
+    const next = practice || (right && a.practiceKind) ? practiceButton(a, practice ? '再换一道同类题' : '再练一次 · 换道同类题')
+      : `<button class="button" data-action="retry-correction">${right ? '再练这道原题' : '再订正一次'}</button>`;
+    body = `<div class="correction-result ${right ? 'right' : 'wrong'}" role="status">
+      <strong>${practice ? verdict : `第 ${result.attempt.attemptNumber} 次订正：${verdict}`}</strong>
+      <p>我的答案：<b>${result.attempt.answer}</b>　正确答案：<b>${result.correctAnswer}</b></p></div>
+      <section class="correction-explanation"><h2>一步一步算</h2><ol>${result.steps.map(s => `<li><strong>${esc(s.reason)}</strong><p class="step-expression">${esc(s.before)}<br>＝ ${esc(s.after)}</p><small>${esc(s.calculation)}</small></li>`).join('')}</ol></section>
+      <div class="actions correction-actions">${next}<a class="button secondary" href="#/mistakes">返回错题本</a></div>
+      ${practice ? '' : `<section class="correction-attempts"><h2>我的订正记录</h2>${attemptsTable(result.attempts)}</section>`}`;
+  } else {
+    body = `<p class="muted small">先独立计算，提交后再看对错和讲解。</p><form id="correction-form"><fieldset>
+      <legend class="sr-only">独立填写${answerLabel}</legend><label>${answerLabel}<input name="correctionAnswer" type="number" min="0" max="${a.answerMax}" step="1" inputmode="numeric" autocomplete="off" required value="${esc(c.answer)}" placeholder="填入你的答案"></label>
+      <button class="button" type="submit">${practice ? '提交练习答案' : '提交订正'}</button></fieldset><p id="correction-error" class="form-error" role="alert"></p></form>`;
+  }
+  return `<a class="back-link" href="#/mistakes">← 返回我的错题本</a>${pageTitle('我的错题本', heading, detail)}
+    <section class="panel correction-paper"><span class="eyebrow">${practice ? esc(a.practiceKind) : `第 ${a.questionNumber} 题`}</span>
+    <p class="correction-expression">${esc(a.expression)} ＝ ?</p>${body}
+    <div class="correction-original"><a class="text-button" href="${mistakeHref(a, true)}">查看当时交的原卷 →</a>
+    <p class="muted small">${practice ? '同类题单独练习，原题的订正次数和作业分数照旧。' : '每次订正单独记录，原作业的答案和分数照旧。'}</p></div></section>`;
 }
 async function saveCorrection() {
   if (state.busy || !state.correction || state.correction.feedback) return;
   const form = document.querySelector('#correction-form');
   if (!form.reportValidity()) return;
-  const c = state.correction, answer = Number(form.elements.correctionAnswer.value);
-  if (!c.request || c.request.answer !== answer) c.request = { answer, requestId: Array.from(crypto.getRandomValues(new Uint8Array(16)), v => v.toString(16).padStart(2, '0')).join('') };
+  const c = state.correction, a = c.question, answer = Number(form.elements.correctionAnswer.value);
+  const path = `/mistakes/${a.assignmentId}/${a.questionNumber}`;
   state.busy = true; form.querySelector('fieldset').disabled = true; errorAt('correction-error', '');
   try {
-    const result = await api(`/mistakes/${c.question.assignmentId}/${c.question.questionNumber}/attempts`, 'POST', c.request);
-    c.feedback = result; state.dirty = false; render();
+    if (a.practiceId) {
+      const saved = await api(`${path}/practice/${a.practiceId}`, 'POST', { answer });
+      c.feedback = saved.feedback;
+    } else {
+      if (!c.request || c.request.answer !== answer) c.request = { answer, requestId: requestKey() };
+      c.feedback = await api(`${path}/attempts`, 'POST', c.request);
+    }
+    state.dirty = false; render();
   } catch (e) { errorAt('correction-error', e.message); }
   finally { state.busy = false; form.querySelector('fieldset').disabled = false; }
 }
@@ -446,15 +492,15 @@ async function load() {
     const match = path.match(/^#\/assignment\/([1-9]\d*)$/);
     const reviewMatch = path.match(/^#\/assignment\/([1-9]\d*)\/student\/([1-9]\d*)$/);
     const historyMatch = path.match(/^#\/students(?:\/([1-9]\d*))?\/history$/);
-    const mistakeMatch = path.match(/^#\/mistakes\/([1-9]\d*)\/([1-9]\d*)(\/original)?$/);
+    const mistakeMatch = path.match(/^#\/mistakes\/([1-9]\d*)\/([1-9]\d*)(\/original|\/practice\/[1-9]\d*)?$/);
     if (path === '#/mistakes' && state.user.role === 'student') {
       const mistakes = await api('/mistakes');
       if (epoch !== loadEpoch) return; state.mistakes = mistakes;
     } else if (mistakeMatch && state.user.role === 'student') {
       const data = await api(`/mistakes/${mistakeMatch[1]}/${mistakeMatch[2]}${mistakeMatch[3] ?? ''}`);
       if (epoch !== loadEpoch) return;
-      if (mistakeMatch[3]) state.assignment = data;
-      else state.correction = { question: data, answer: '', feedback: null, request: null };
+      if (mistakeMatch[3] === '/original') state.assignment = data;
+      else state.correction = { question: data, answer: '', feedback: data.feedback ?? null, request: null };
     } else if (path === '#/analytics' && state.user.role === 'teacher') {
       const query = new URLSearchParams({ classId: String(state.classId) });
       for (const key of ['from', 'to', 'assignmentId', 'questionNumber']) if (params.has(key)) query.set(key, params.get(key));
@@ -840,6 +886,7 @@ root.addEventListener('click', async event => {
   if (action === 'confirm-preview') await confirmPreview();
   if (action === 'replace-preview') { const form = document.querySelector('#publish-form'); if (form.reportValidity()) await requestPreview(form); }
   if (action === 'edit-preview') { document.querySelector('#publish-form')?.scrollIntoView?.({ block: 'start' }); document.querySelector('#publish-form [name="title"]')?.focus(); }
+  if (action === 'start-practice') await openPractice(event.target.closest('button'));
   if (action === 'retry-correction' && state.correction) {
     const c = state.correction;
     state.correction = { question: { ...c.question, attemptCount: c.feedback.attemptCount }, answer: '', feedback: null, request: null };

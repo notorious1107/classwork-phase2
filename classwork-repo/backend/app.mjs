@@ -9,7 +9,7 @@ import { calendarMonth, beijingDateKey } from './calendar.mjs';
 import { assignmentStudents } from './reporting.mjs';
 import { analyticsFilters, analyticsSelection, aggregatePractice } from './analytics.mjs';
 import { historyFilters, matchesTopic, submissionStatus } from './records.mjs';
-import { mistakeBook, mistakeSource, correctionQuestion, correctionHistory, submitCorrection } from './corrections.mjs';
+import { mistakeBook, mistakeSource, correctionQuestion, correctionHistory, submitCorrection, startPractice, practiceQuestion } from './corrections.mjs';
 
 class HttpError extends Error {
   constructor(status, message) { super(message); this.status = status; }
@@ -259,7 +259,7 @@ export async function createApp({ dbPath = 'data/classwork.sqlite', teacherPassw
       if (path === '/api/mistakes' && req.method === 'GET') {
         requireRole(user, 'student'); return send(200, mistakeBook(db, user.id));
       }
-      const mistakeMatch = path.match(/^\/api\/mistakes\/([1-9]\d*)\/([1-9]\d*)(?:\/(attempts|original))?$/);
+      const mistakeMatch = path.match(/^\/api\/mistakes\/([1-9]\d*)\/([1-9]\d*)(?:\/(attempts|original|practice(?:\/([1-9]\d*))?))?$/);
       if (mistakeMatch) {
         requireRole(user, 'student');
         const assignmentId = Number(mistakeMatch[1]), questionNumber = Number(mistakeMatch[2]), action = mistakeMatch[3];
@@ -269,8 +269,20 @@ export async function createApp({ dbPath = 'data/classwork.sqlite', teacherPassw
         if (action === 'attempts' && req.method === 'GET') return send(200, correctionHistory(db, user.id, assignmentId, questionNumber));
         if (action === 'attempts' && req.method === 'POST') {
           const input = await body(req);
+          recheckSession();
           const result = submitCorrection(db, user.id, assignmentId, questionNumber, input, clock());
           return send(result.created ? 201 : 200, result.result);
+        }
+        if (action === 'practice' && req.method === 'POST') {
+          const input = await body(req);
+          recheckSession();
+          const result = startPractice(db, user.id, assignmentId, questionNumber, input.requestId);
+          return send(result.created ? 201 : 200, { practiceId: result.practiceId });
+        }
+        if (mistakeMatch[4] && ['GET', 'POST'].includes(req.method)) {
+          const input = req.method === 'POST' ? await body(req) : undefined;
+          recheckSession();
+          return send(200, practiceQuestion(db, user.id, assignmentId, questionNumber, Number(mistakeMatch[4]), input));
         }
       }
       if (path === '/api/practice-options' && req.method === 'GET') { requireRole(user, 'teacher'); return send(200, practiceOptions); }

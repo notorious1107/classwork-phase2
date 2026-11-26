@@ -6,6 +6,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createApp } from '../backend/app.mjs';
 import { explainQuestion } from '../backend/corrections.mjs';
+import { similarAddSubQuestion } from '../backend/papers.mjs';
+import { publishAssignment, solution } from '../backend/store.mjs';
 import { correctionQuestions, seedCorrections } from './correction-fixture.mjs';
 import { createHistoryClass, snapshot, studentPassword, teacherPassword, historyAssignments } from './history-fixture.mjs';
 
@@ -58,6 +60,71 @@ test('沿用旧订正表，逐题接续编号并保留原答案、时间和请�
       add.run(0, 0, '2026-10-01T08:00:00Z', 'legacy-request-001');
       add.run(27, 1, '2026-10-02T08:00:00Z', 'legacy-request-002');
     } finally { db.close(); }
+  });
+});
+
+test('20 以内每道一步加减法都能换数，首题和连续再练均保留运算及进退位', () => {
+  for (const op of ['+', '-']) for (let a = 0; a <= 20; a++) for (let b = 0; b <= 20; b++) {
+    const original = { a, b, op }, result = solution(original);
+    if (result < 0 || result > 20) continue;
+    const history = [];
+    for (let i = 0; i < 3; i++) {
+      const q = similarAddSubQuestion(original, history);
+      assert.equal(q.op, op);
+      assert.ok([q.a, q.b, solution(q)].every(n => Number.isInteger(n) && n >= 0 && n <= 20));
+      assert.equal(op === '+' ? q.a % 10 + q.b % 10 >= 10 : q.a % 10 < q.b % 10,
+        op === '+' ? a % 10 + b % 10 >= 10 : a % 10 < b % 10);
+      for (const previous of [original, ...history.slice(0, 1)]) {
+        assert.notEqual(q.a, previous.a); assert.notEqual(q.b, previous.b); assert.notEqual(solution(q), solution(previous));
+      }
+      history.unshift(q);
+    }
+  }
+});
+
+test('订正正确后独立生成并批改同类新题，重试、重启和换账号均保留题目归属', async () => {
+  await withBook(async ({ db, request, login, restart }) => {
+    const { students, shared } = seedCorrections(db);
+    const id = publishAssignment(db, '再练测试卷');
+    const original = { a: 18, op: '−', b: 5 };
+    db.prepare('UPDATE assignments SET questions=? WHERE id=?').run(JSON.stringify(Array(10).fill(original)), id);
+    const answers = [0, ...Array(9).fill(13)];
+    const add = db.prepare('INSERT INTO submissions(assignment_id,student_id,answers,saved_at,submitted_at,score) VALUES(?,?,?,?,?,90)');
+    for (const student of [students.learner, students.other]) add.run(id, student, JSON.stringify(answers), '2026-11-20T10:00:00Z', '2026-11-20T10:00:00Z');
+    const before = snapshot(db), pupil = await login('learner'), other = await login('other'), teacher = await login('teacher');
+    const base = `/mistakes/${id}/1`, path = base + '/practice', input = { requestId: 'new-practice-first' };
+    assert.equal((await request(path, pupil, 'POST', input)).status, 409);
+    await request(base + '/attempts', pupil, 'POST', { answer: 13, requestId: 'correct-original-001' });
+    assert.equal((await request(path, teacher, 'POST', input)).status, 403);
+    assert.equal((await request(path, other, 'POST', input)).status, 409);
+    assert.equal((await request(path, null, 'POST', input)).status, 401);
+    assert.equal((await request(`/mistakes/${shared}/1/practice`, pupil, 'POST', input)).status, 400);
+    const first = await Promise.all([request(path, pupil, 'POST', input), request(path, pupil, 'POST', input)]);
+    assert.deepEqual(first.map(r => r.status).sort(), [200, 201]);
+    assert.deepEqual(first[0].body, first[1].body);
+    const practice = path + '/' + first[0].body.practiceId;
+    const view = (await request(practice, pupil)).body;
+    assert.equal(view.practiceKind, '不退位减法'); assert.notEqual(view.expression, '18 − 5');
+    assert.equal(view.feedback, undefined); assert.equal(view.correctAnswer, undefined);
+    const [a, b] = view.expression.split(' − ').map(Number), answer = a - b;
+    assert.equal((await request(practice, other)).status, 404);
+    assert.equal((await request(practice, other, 'POST', { answer, studentId: students.learner })).status, 404);
+    assert.equal((await request(practice, pupil, 'POST', { answer: null })).status, 400);
+    const marked = await request(practice, pupil, 'POST', { answer: 13, correctAnswer: 13 });
+    assert.equal(marked.status, 200); assert.equal(marked.body.feedback.attempt.correct, false);
+    assert.equal(marked.body.feedback.correctAnswer, answer);
+    assert.deepEqual((await request(practice, pupil, 'POST', { answer: 13 })).body, marked.body);
+    assert.equal((await request(practice, pupil, 'POST', { answer })).status, 409);
+    const next = await request(path, pupil, 'POST', { requestId: 'new-practice-second' });
+    const second = path + '/' + next.body.practiceId, secondView = (await request(second, pupil)).body;
+    assert.notEqual(secondView.expression, view.expression); assert.equal(secondView.feedback, undefined);
+    const [left, right] = secondView.expression.split(' − ').map(Number);
+    const correct = (await request(second, pupil, 'POST', { answer: left - right })).body.feedback;
+    assert.equal(correct.attempt.correct, true); assert.ok(correct.steps[0].calculation.startsWith(secondView.expression));
+    const reopened = await restart();
+    assert.deepEqual((await request(practice, pupil)).body, marked.body);
+    assert.equal((await request(base + '/attempts', pupil)).body.length, 1);
+    assert.deepEqual(snapshot(reopened), before);
   });
 });
 

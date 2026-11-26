@@ -1,4 +1,5 @@
 import { solution, formatExpression, questionCategoriesFor } from './store.mjs';
+import { addSubPracticeKind, similarAddSubQuestion } from './papers.mjs';
 
 const fail = (status, message) => { throw Object.assign(new Error(message), { status }); };
 const opInfo = op => {
@@ -53,7 +54,7 @@ export function correctionHistory(db, studentId, assignmentId, questionNumber) {
 export function correctionQuestion(db, studentId, assignmentId, questionNumber) {
   const source = mistakeSource(db, studentId, assignmentId, questionNumber);
   return { assignmentId, questionNumber, title: source.row.title, expression: formatExpression(source.question),
-    answerMax: source.category === 'mixed-100' ? 100 : 20,
+    answerMax: source.category === 'mixed-100' ? 100 : 20, practiceKind: addSubPracticeKind(source.question),
     attemptCount: correctionHistory(db, studentId, assignmentId, questionNumber).length };
 }
 export function mistakeBook(db, studentId) {
@@ -70,7 +71,7 @@ export function mistakeBook(db, studentId) {
     questions.forEach((q, i) => {
       if (answers[i] === solution(q)) return;
       items.push({ assignmentId: row.id, questionNumber: i + 1, title: row.title, createdAt: row.created_at, submittedAt: row.submitted_at,
-        expression: formatExpression(q), originalAnswer: answers[i] ?? null, originalStatus: answers[i] == null || answers[i] === '' ? 'missing' : 'wrong',
+        expression: formatExpression(q), practiceKind: addSubPracticeKind(q), originalAnswer: answers[i] ?? null, originalStatus: answers[i] == null || answers[i] === '' ? 'missing' : 'wrong',
         ...(progress.get(`${row.id}:${i + 1}`) ?? { attemptCount: 0, firstCorrectAttempt: null, lastAttemptCorrect: null }) });
     });
   }
@@ -98,4 +99,46 @@ export function submitCorrection(db, studentId, assignmentId, questionNumber, in
   } catch (e) { db.exec('ROLLBACK'); throw e; }
   const attempts = correctionHistory(db, studentId, assignmentId, questionNumber);
   return { created, result: { ...correctionQuestion(db, studentId, assignmentId, questionNumber), ...explanation, attempt: attempts.find(a => a.attemptNumber === attemptNumber), attempts } };
+}
+
+export function startPractice(db, studentId, assignmentId, questionNumber, requestId) {
+  const source = mistakeSource(db, studentId, assignmentId, questionNumber);
+  if (!addSubPracticeKind(source.question)) fail(400, '同类再练目前支持 20 以内的一步加减法');
+  if (typeof requestId !== 'string' || !/^[A-Za-z0-9_-]{16,80}$/.test(requestId)) fail(400, '再练请求标识无效');
+  const key = [studentId, assignmentId, questionNumber];
+  if (!db.prepare('SELECT 1 FROM correction_attempts WHERE student_id=? AND assignment_id=? AND question_number=? AND correct=1 LIMIT 1').get(...key)) {
+    fail(409, '请先把原题订正正确，再练同类题');
+  }
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const existing = db.prepare('SELECT id,assignment_id,question_number FROM mistake_practice WHERE student_id=? AND request_key=?').get(studentId, requestId);
+    let id = existing?.id;
+    if (existing) {
+      if (existing.assignment_id !== assignmentId || existing.question_number !== questionNumber) fail(409, '该请求已用于另一道练习');
+    } else {
+      const history = db.prepare(`SELECT question FROM mistake_practice WHERE student_id=? AND assignment_id=? AND question_number=?
+        GROUP BY question ORDER BY MAX(id) DESC`).all(...key);
+      const question = similarAddSubQuestion(source.question, history.map(row => JSON.parse(row.question)));
+      id = Number(db.prepare('INSERT INTO mistake_practice(student_id,assignment_id,question_number,request_key,question) VALUES(?,?,?,?,?)')
+        .run(...key, requestId, JSON.stringify(question)).lastInsertRowid);
+    }
+    db.exec('COMMIT');
+    return { practiceId: id, created: !existing };
+  } catch (e) { db.exec('ROLLBACK'); throw e; }
+}
+
+export function practiceQuestion(db, studentId, assignmentId, questionNumber, practiceId, input) {
+  const row = db.prepare(`SELECT p.question,p.answer,a.title FROM mistake_practice p JOIN assignments a ON a.id=p.assignment_id
+    WHERE p.id=? AND p.student_id=? AND p.assignment_id=? AND p.question_number=?`).get(practiceId, studentId, assignmentId, questionNumber);
+  if (!row) fail(404, '同类练习不存在');
+  const question = JSON.parse(row.question);
+  if (input !== undefined) {
+    if (!Number.isInteger(input.answer) || input.answer < 0 || input.answer > 20) fail(400, '练习答案请填写 0–20 的整数');
+    const written = db.prepare('UPDATE mistake_practice SET answer=? WHERE id=? AND (answer IS NULL OR answer=?)').run(input.answer, practiceId, input.answer);
+    if (!written.changes) fail(409, '这道练习已作答，请刷新查看结果');
+    row.answer = input.answer;
+  }
+  const view = { assignmentId, questionNumber, practiceId, title: row.title, practiceKind: addSubPracticeKind(question), expression: formatExpression(question), answerMax: 20 };
+  if (row.answer !== null) view.feedback = { attempt: { answer: row.answer, correct: row.answer === solution(question) }, ...explainQuestion(question) };
+  return view;
 }

@@ -145,6 +145,13 @@ export async function openStore(path, teacherPassword = 'Teacher123!') {
     request_key TEXT NOT NULL, answer INTEGER NOT NULL CHECK(answer>=0), correct INTEGER NOT NULL CHECK(correct IN (0,1)), created_at TEXT NOT NULL,
     UNIQUE(student_id,assignment_id,question_number,attempt_number), UNIQUE(student_id,request_key)
   )`);
+  db.exec(`CREATE TABLE IF NOT EXISTS mistake_practice (
+    id INTEGER PRIMARY KEY, student_id INTEGER NOT NULL, assignment_id INTEGER NOT NULL,
+    question_number INTEGER NOT NULL, request_key TEXT NOT NULL, question TEXT NOT NULL,
+    answer INTEGER CHECK(answer BETWEEN 0 AND 20), UNIQUE(student_id, request_key),
+    FOREIGN KEY(assignment_id,student_id) REFERENCES submissions(assignment_id,student_id)
+  );
+  CREATE INDEX IF NOT EXISTS mistake_practice_source ON mistake_practice(student_id,assignment_id,question_number,id)`);
   db.exec('BEGIN IMMEDIATE');
   try {
     upgradeCorrectionAttempts(db);

@@ -35,11 +35,33 @@ const pools = Object.fromEntries(['+', '-', '*', '/'].map(op => {
   }
   return [op, list];
 }));
+const addOp = op => op === '+' || op === '＋';
+const regroups = q => addOp(q.op) ? q.a % 10 + q.b % 10 >= 10 : q.a % 10 < q.b % 10;
+export function addSubPracticeKind(q) {
+  if (!['+', '-', '＋', '−'].includes(q.op) ||
+      ![q.a, q.b].every(n => Number.isInteger(n) && n >= 0 && n <= 20)) return null;
+  if (addOp(q.op)) return q.a + q.b > 20 ? null : regroups(q) ? '进位加法' : '不进位加法';
+  return q.a < q.b ? null : regroups(q) ? '退位减法' : '不退位减法';
+}
+export function similarAddSubQuestion(source, history = []) {
+  if (!addSubPracticeKind(source)) throw new Error('这道题暂不支持同类再练');
+  const plus = addOp(source.op);
+  const answer = q => plus ? q.a + q.b : q.a - q.b;
+  const differs = (q, other) => q.a !== other.a && q.b !== other.b && answer(q) !== answer(other);
+  const candidates = pools[plus ? '+' : '-'].filter(q => {
+    return regroups(q) === regroups(source) && q.a > 0 && q.b > 0 && answer(q) > 0 &&
+      differs(q, source) && (!history.length || differs(q, history[0]));
+  });
+  const key = q => plus && q.a > q.b ? `${q.b},${q.a}` : `${q.a},${q.b}`;
+  const seen = new Set(history.map(key));
+  const unused = candidates.filter(q => !seen.has(key(q)));
+  const pool = unused.length ? unused : candidates;
+  const sameDigits = pool.filter(q => (q.a >= 10) === (source.a >= 10) && (q.b >= 10) === (source.b >= 10));
+  const choices = sameDigits.length ? sameDigits : pool;
+  return choices[randomInt(choices.length)];
+}
 function binaryPool(op, difficulty) {
-  if (op === '+' || op === '-') return shuffle(pools[op].filter(q => {
-    const regroup = op === '+' ? q.a % 10 + q.b % 10 >= 10 : q.a % 10 < q.b % 10;
-    return difficulty === 'advanced' ? regroup : !regroup;
-  }));
+  if (op === '+' || op === '-') return shuffle(pools[op].filter(q => regroups(q) === (difficulty === 'advanced')));
   if (difficulty === 'basic') return shuffle(pools[op].filter(q => {
     const factors = op === '*' ? [q.a, q.b] : [q.b, q.a / q.b];
     return factors.some(n => [0, 1, 2, 5, 10].includes(n));
